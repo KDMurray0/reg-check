@@ -15,8 +15,9 @@ by cross-photo consensus first and total agreement second.
 
 from __future__ import annotations
 
+import itertools
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 
 # Current-style UK plate: two letters, two digits, three letters ("AB12 CDE").
 PLATE_STRICT_RE = re.compile(r"^[A-Z]{2}[0-9]{2}[A-Z]{3}$")
@@ -95,6 +96,23 @@ _DIGIT_NEIGHBOURS = {
     "0": "86", "1": "7", "3": "89", "5": "68", "6": "580", "7": "1",
     "8": "0693", "9": "084",
 }
+
+# Valid current-style age identifiers (the two digits): March plates 02-25 and
+# September plates 51-75. A real plate's digits are ALWAYS one of these, so a
+# read whose digits fall outside is either a misread or an older/personal plate.
+VALID_AGE = {f"{n:02d}" for n in list(range(2, 26)) + list(range(51, 76))}
+
+
+def _age_fix(dd: str):
+    """Valid age codes reachable by swapping one digit of a misread (e.g. an
+    OCR '13'->'18' confusion), so a wrong-but-close age can still be verified."""
+    out = set()
+    for i in (0, 1):
+        for alt in _DIGIT_NEIGHBOURS.get(dd[i], ""):
+            cand = dd[:i] + alt + dd[i + 1:]
+            if cand in VALID_AGE:
+                out.add(cand)
+    return out
 
 
 def plate_near_misses(plate: str):
@@ -180,6 +198,153 @@ def read_plate_candidates(img, engines, cv2, np):
     return plate_hits, texts
 
 
+# --- Confidence-weighted character-level reading (primary) -----------------
+#
+# The recognisers return a per-character probability for every read. Rather than
+# voting on whole-plate strings (where one wrong character throws the whole read
+# away), we collect every 7-character read with its per-character confidence and
+# vote PER POSITION. The winning character at each position reconstructs the true
+# plate even when no single read got all seven right - and a small beam over the
+# genuinely ambiguous positions gives the DVSA check a few high-value variants to
+# confirm. This is the single biggest accuracy win, especially on Cazoo photos
+# with no plate-first ordering.
+
+def read_plate_reads(img, engines, cv2, np, enhanced=True):
+    """Read one image, returning (reads, texts).
+
+    reads - list of (chars, probs): every exactly-7-character recogniser output
+            with its per-character confidence (probs aligned to chars).
+    texts - raw plate-region strings, used to spot dealer/trade branding.
+    """
+    reads: list[tuple[str, list[float]]] = []
+    texts: list[str] = []
+    detector = engines.get("detector")
+    plate_ocrs = engines.get("plate_ocrs") or []
+    reader = engines.get("easyocr")
+
+    for crop in _detect_plate_crops(detector, cv2, np, img):
+        for variant in _crop_variants(cv2, np, crop, enhanced):
+            for pocr in plate_ocrs:
+                raw, probs = _plate_ocr_conf(pocr, variant)
+                if not raw:
+                    continue
+                texts.append(re.sub(r"[^A-Z0-9]", "", raw.upper()))
+                r = _clean_read(raw, probs)
+                if r:
+                    reads.append(r)
+
+    if reader is not None:  # full-image easyocr backup, with its box confidence
+        for chars, conf in _easyocr_conf(
+                reader, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)):
+            reads.append((chars, [conf] * 7))
+
+    return reads, texts
+
+
+def _clean_read(raw: str, probs):
+    """Keep the alphanumeric characters (and their confidences) from one read;
+    return (chars, probs) only if exactly seven remain."""
+    chars, ps = [], []
+    for i, ch in enumerate(raw.upper()):
+        if ch.isalnum():
+            chars.append(ch)
+            ps.append(float(probs[i]) if probs is not None and i < len(probs) else 0.6)
+    return ("".join(chars), ps) if len(chars) == 7 else None
+
+
+def _plate_ocr_conf(plate_ocr, gray):
+    """Run one recogniser, returning (raw_string_with_padding, char_probs)."""
+    try:
+        preds = plate_ocr.run(gray, return_confidence=True, remove_pad_char=False)
+        pred = preds[0] if isinstance(preds, list) and preds else preds
+        raw = getattr(pred, "plate", "") or ""
+        probs = getattr(pred, "char_probs", None)
+        return raw, probs
+    except Exception:
+        return "", None
+
+
+def _easyocr_conf(reader, gray):
+    """easyocr reads as (7-char string, confidence) pairs."""
+    out = []
+    try:
+        for _box, text, conf in reader.readtext(
+                gray, detail=1, paragraph=False, allowlist=PLATE_ALLOWLIST,
+                decoder=OCR_DECODER, beamWidth=OCR_BEAM_WIDTH,
+                mag_ratio=OCR_MAG_RATIO):
+            t = re.sub(r"[^A-Z0-9]", "", (text or "").upper())
+            if len(t) == 7:
+                out.append((t, float(conf)))
+    except Exception:
+        pass
+    return out
+
+
+def consensus_candidates(reads, max_candidates=12, age_prior=True):
+    """Rank plate guesses from confidence-weighted per-position voting.
+
+    Every read is first forced to the UK 'LL DD LLL' shape, so per-position tallies
+    live in a space where letter positions hold only letters and digit positions
+    only digits. The per-position winners give the consensus plate; a beam over the
+    up-to-three genuinely ambiguous positions adds a handful of variants. Each
+    candidate is scored by the confidence mass backing its exact characters.
+
+    With age_prior on, candidates whose two digits are a real DVLA age code are
+    preferred, and age-valid variants of any near-miss age are added for the DVSA
+    check to confirm.
+
+    Returns [(plate, score)] best first - the order the DVSA check runs in.
+    """
+    pos = [defaultdict(float) for _ in range(7)]
+    whole: dict[str, float] = defaultdict(float)
+    n = 0
+    for chars, ps in reads:
+        corr = _correct_plate(chars)
+        if not corr:
+            continue
+        reg = corr.replace(" ", "")
+        for i in range(7):
+            pos[i][reg[i]] += ps[i]
+        whole[corr] += sum(ps) / 7.0
+        n += 1
+    if not n:
+        return []
+
+    ranked = [sorted(pos[i].items(), key=lambda kv: kv[1], reverse=True)
+              for i in range(7)]
+    base = [ranked[i][0][0] for i in range(7)]
+    ambiguous = [i for i in range(7) if len(ranked[i]) >= 2
+                 and ranked[i][1][1] >= 0.4 * ranked[i][0][1]]
+    ambiguous = sorted(ambiguous,
+                       key=lambda i: ranked[i][1][1] / (ranked[i][0][1] + 1e-9),
+                       reverse=True)[:3]
+
+    pool = set(whole)                       # whole-plate reads that already agreed
+    for bits in itertools.product((0, 1), repeat=len(ambiguous)):
+        reg = list(base)
+        for k, i in enumerate(ambiguous):
+            reg[i] = ranked[i][bits[k]][0]
+        reg = "".join(reg)
+        pool.add(f"{reg[:4]} {reg[4:]}")
+
+    if age_prior:                           # add age-valid variants of near-miss ages
+        for cand in list(pool):
+            reg = cand.replace(" ", "")
+            if reg[2:4] not in VALID_AGE:
+                for dd in _age_fix(reg[2:4]):
+                    pool.add(f"{reg[:2]}{dd} {reg[4:]}")
+
+    def score(plate: str) -> float:
+        reg = plate.replace(" ", "")
+        s = sum(pos[i].get(reg[i], 0.0) for i in range(7))
+        if age_prior and reg[2:4] in VALID_AGE:
+            s *= 1.15                        # prefer real age codes
+        return s
+
+    return sorted(((p, score(p)) for p in pool),
+                  key=lambda kv: kv[1], reverse=True)[:max_candidates]
+
+
 def _detect_boxes(detector, img):
     try:
         return [(int(d.bounding_box.x1), int(d.bounding_box.y1),
@@ -229,8 +394,14 @@ def _detect_plate_crops(detector, cv2, np, img) -> list:
     return crops
 
 
-def _crop_variants(cv2, np, crop) -> list:
-    """Grayscale variants of a plate crop: raw, CLAHE-enhanced, and deskewed."""
+def _crop_variants(cv2, np, crop, enhanced=False) -> list:
+    """Grayscale variants of a plate crop for the recognisers to read.
+
+    Always: raw, CLAHE-equalised, and a perspective-deskewed frontal warp.
+    Enhanced adds Otsu binarisation, an unsharp-mask sharpen, and a small +/-7
+    degree rotation sweep - each a fresh shot for the recognisers, which the
+    character-level consensus then turns into accuracy.
+    """
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     variants = [gray]
     try:
@@ -244,6 +415,25 @@ def _crop_variants(cv2, np, crop) -> list:
             variants.append(desk)
     except Exception:
         pass
+    if enhanced:
+        try:
+            variants.append(cv2.threshold(gray, 0, 255,
+                            cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1])
+        except Exception:
+            pass
+        try:
+            blur = cv2.GaussianBlur(gray, (0, 0), 3)
+            variants.append(cv2.addWeighted(gray, 1.6, blur, -0.6, 0))
+        except Exception:
+            pass
+        h, w = gray.shape[:2]
+        for ang in (-7, 7):
+            try:
+                m = cv2.getRotationMatrix2D((w / 2, h / 2), ang, 1.0)
+                variants.append(cv2.warpAffine(gray, m, (w, h),
+                                borderMode=cv2.BORDER_REPLICATE))
+            except Exception:
+                pass
     return variants
 
 

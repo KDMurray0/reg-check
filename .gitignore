@@ -4,6 +4,10 @@ reg_check_config.json
 # generated output
 extraction_results.txt
 
+# local scratch / test-image cache
+cache/
+_*.py
+
 # python
 __pycache__/
 *.py[cod]

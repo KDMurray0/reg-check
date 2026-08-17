@@ -19,14 +19,18 @@ from collections import Counter
 
 from . import scrape
 from .mot import (MOTClient, format_mot_history, shape_vehicle, vehicle_tier)
-from .plates import (contains_dealer_text, decode_image, extract_plates,
-                     plate_near_misses, read_plate_candidates)
+from .plates import (_correct_plate, consensus_candidates, contains_dealer_text,
+                     decode_image, plate_near_misses, read_plate_reads)
 
 # ANPR: a licence-plate detector localises each plate, then an ensemble of
 # plate-specialised recognisers (different architectures make different mistakes)
 # reads the crop - far more accurate than general OCR.
-ANPR_DETECTOR_MODEL = "yolo-v9-t-640-license-plate-end2end"
-ANPR_OCR_MODELS = ["european-plates-mobile-vit-v2-model", "cct-s-v2-global-model"]
+ANPR_DETECTOR_MODEL = os.environ.get("REGCHECK_DETECTOR",
+                                     "yolo-v9-t-640-license-plate-end2end")
+# An ensemble of differently-built recognisers: they make different mistakes, so
+# the character-level consensus vote across them lands on the truth more often.
+ANPR_OCR_MODELS = ["european-plates-mobile-vit-v2-model", "cct-s-v2-global-model",
+                   "global-plates-mobile-vit-v2-model"]
 
 MAX_CANDIDATE_LOOKUPS = 12    # distinct guesses to verify before giving up
 MAX_NEAR_MISS_LOOKUPS = 40    # single-char variants tried when nothing verifies
@@ -41,18 +45,48 @@ DEFAULT_OPTIONS = {
 }
 
 
+# Preferred ONNX Runtime GPU providers, best first. DirectML covers AMD (e.g. a
+# 7900 XTX) and Intel GPUs on Windows; CUDA covers NVIDIA (and AMD via ZLUDA);
+# ROCm covers AMD on Linux. Install the matching onnxruntime build to enable one
+# (e.g. `pip install onnxruntime-directml` for AMD/Windows) - the ANPR detector
+# and recognisers then run on the GPU with no code change.
+GPU_ONNX_PROVIDERS = ("DmlExecutionProvider", "CUDAExecutionProvider",
+                      "ROCMExecutionProvider")
+
+
+def _onnx_providers(log):
+    """Return the ONNX providers to use: the best available GPU one + CPU."""
+    try:
+        import onnxruntime as ort
+        available = ort.get_available_providers()
+    except Exception:
+        return None
+    for p in GPU_ONNX_PROVIDERS:
+        if p in available:
+            log(f"[Init] GPU acceleration: ONNX {p}")
+            return [p, "CPUExecutionProvider"]
+    log("[Init] ONNX on CPU (install onnxruntime-directml / -gpu for GPU).")
+    return ["CPUExecutionProvider"]
+
+
 def load_plate_engines(log):
     """Load the plate-reading engines. ANPR is primary; easyocr is an optional
-    full-image recall backup. Raises only if neither is available."""
+    full-image recall backup. Raises only if neither is available.
+
+    ONNX models use a GPU execution provider automatically when one is available;
+    easyocr uses the GPU when torch reports CUDA (including AMD via ZLUDA)."""
     engines = {"plate_ocrs": []}
+    providers = _onnx_providers(log)
     try:
         from open_image_models import LicensePlateDetector
         from fast_plate_ocr import LicensePlateRecognizer
         log("[Init] Loading ANPR plate detector...")
-        engines["detector"] = LicensePlateDetector(detection_model=ANPR_DETECTOR_MODEL)
+        engines["detector"] = LicensePlateDetector(
+            detection_model=ANPR_DETECTOR_MODEL, providers=providers)
         for name in ANPR_OCR_MODELS:
             try:
-                engines["plate_ocrs"].append(LicensePlateRecognizer(name, device="cpu"))
+                engines["plate_ocrs"].append(
+                    LicensePlateRecognizer(name, providers=providers))
                 log(f"[Init] Loaded ANPR recogniser: {name}")
             except Exception as exc:
                 log(f"[Init] Could not load ANPR recogniser {name}: {exc}")
@@ -63,8 +97,15 @@ def load_plate_engines(log):
     engines["easyocr"] = None
     try:
         import easyocr
-        log("[Init] Loading easyocr backup reader (first run downloads weights)...")
-        engines["easyocr"] = easyocr.Reader(["en"], gpu=False)
+        gpu = False
+        try:
+            import torch
+            gpu = bool(torch.cuda.is_available())
+        except Exception:
+            gpu = False
+        log(f"[Init] Loading easyocr backup reader (gpu={gpu}; "
+            f"first run downloads weights)...")
+        engines["easyocr"] = easyocr.Reader(["en"], gpu=gpu)
         log("[Init] easyocr ready.")
     except Exception as exc:
         log(f"[Init] easyocr unavailable ({exc}); running on ANPR only.")
@@ -216,8 +257,8 @@ class Pipeline:
             self.review.append((url, location, "no images found"))
             return
 
-        image_votes: Counter[str] = Counter()   # distinct photos a plate appears in
-        total_hits: Counter[str] = Counter()     # sum of within-photo agreement
+        all_reads = []                           # (chars, probs) from every photo
+        image_votes: Counter[str] = Counter()    # distinct photos a plate appears in
         dealer_hits = 0
         images_read = 0
 
@@ -232,13 +273,17 @@ class Pipeline:
             if img is None:
                 continue
             images_read += 1
-            plate_hits, texts = read_plate_candidates(img, engines, cv2, np)
-            for plate, hits in plate_hits.items():
-                first = plate not in image_votes
-                image_votes[plate] += 1
-                total_hits[plate] += hits
-                if first:
+            reads, texts = read_plate_reads(img, engines, cv2, np, enhanced=True)
+            all_reads.extend(reads)
+            seen = set()
+            for chars, _ps in reads:
+                corr = _correct_plate(chars)
+                if corr:
+                    seen.add(corr)
+            for plate in seen:
+                if plate not in image_votes:
                     self.log(f"[Read] Candidate plate: {plate}")
+                image_votes[plate] += 1
             if contains_dealer_text(texts):
                 dealer_hits += 1
             # Plate shots are read first, so a plate seen in several photos is very
@@ -264,10 +309,10 @@ class Pipeline:
                            "note": "no plate could be read"})
             return
 
-        # Rank by cross-photo consensus first, then total agreement.
-        ordered = [(p, image_votes[p]) for p, _ in sorted(
-            image_votes.items(), key=lambda kv: (kv[1], total_hits[kv[0]]),
-            reverse=True)]
+        # Character-level consensus across every read (per-position confidence
+        # voting + a beam over ambiguous positions + UK age prior), best first.
+        cands = consensus_candidates(all_reads, MAX_CANDIDATE_LOOKUPS, age_prior=True)
+        ordered = [(p, image_votes.get(p, 0)) for p, _ in cands]
 
         base = {"price": price, "location": location, "distanceMiles": distance_miles,
                 "url": url, "site": site, "make": make, "model": model}
