@@ -1,0 +1,29 @@
+# Web GUI
+Flask>=3.0
+
+# Web automation (run `playwright install chromium` once after installing)
+playwright==1.44.0
+
+# Plate reading — dedicated ANPR (ONNX-based, no torch needed):
+# a licence-plate detector + an ensemble of plate-specialised recognisers.
+open-image-models==0.5.1
+fast-plate-ocr==1.1.0
+onnxruntime==1.27.0
+
+# Image handling — headless OpenCV (no GUI libs) is correct for a server app and
+# ships wheels built for NumPy 2. Do NOT also install plain opencv-python: the two
+# share the cv2/ folder and a NumPy-1 build of it crashes cv2 under NumPy 2.
+opencv-python-headless>=4.10
+numpy>=1.26,<3
+
+# Networking (image fetch + MOT REST/OAuth calls)
+requests>=2.31
+
+# OPTIONAL: easyocr is a full-image recall backup and pulls in torch (~2 GB). The
+# ANPR ensemble handles plates without it, so it is optional:
+#   pip install easyocr
+# The app auto-detects easyocr and runs ANPR-only if it (or torch) is missing.
+
+# Notes:
+#  - The ANPR detector + recogniser ONNX weights download on first run (small).
+#  - easyocr, if installed, downloads its weights (~100 MB) on first run.

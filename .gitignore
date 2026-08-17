@@ -1,0 +1,18 @@
+# DVSA credentials — plaintext secrets, never commit
+reg_check_config.json
+
+# generated output
+extraction_results.txt
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

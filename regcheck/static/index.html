@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reg Check — Inspection Bay</title>
+  <link rel="preconnect" href="https://history.mot.api.gov.uk" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="wordmark">
+      <span class="wordmark__mark" aria-hidden="true"></span>
+      <span class="wordmark__text">REG&middot;CHECK</span>
+      <span class="wordmark__sub">inspection bay</span>
+    </div>
+    <div class="status" id="status">
+      <span class="status__lamp" id="statusLamp" data-state="idle"></span>
+      <span class="status__text" id="statusText">Idle</span>
+    </div>
+    <div class="tallies" id="tallies" hidden>
+      <span class="tally tally--pass"><b id="tallyVerified">0</b> verified</span>
+      <span class="tally tally--dealer"><b id="tallyDealer">0</b> dealer</span>
+      <span class="tally tally--review"><b id="tallyReview">0</b> review</span>
+      <button class="theme-toggle" id="themeToggle" type="button" title="Toggle theme" aria-label="Toggle light/dark">◑</button>
+    </div>
+  </header>
+
+  <main class="bay">
+    <!-- Control console -->
+    <aside class="console">
+      <section class="panel">
+        <h2 class="eyebrow">Links</h2>
+        <p class="hint">Paste Auto Trader or Cazoo <b>search</b> or <b>listing</b> links, one per line.</p>
+        <textarea id="urls" class="urls" spellcheck="false" rows="5"
+          placeholder="https://www.autotrader.co.uk/car-search?make=Nissan&model=Navara&postcode=M40 1QB&price-to=5000&body-type=Pickup
+https://www.cazoo.co.uk/vans/nissan/navara/"></textarea>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <h2 class="eyebrow">DVSA MOT API</h2>
+          <span class="conn" id="conn" data-ok="false">checking…</span>
+        </div>
+        <p class="hint" id="credHint">The free official history feed. Enter your four DVSA credentials once — they are saved on this PC and never leave it.</p>
+        <button class="link-btn" id="credToggle" type="button" aria-expanded="false">Enter / update credentials</button>
+        <div class="cred" id="credForm" hidden>
+          <label>Client ID <input id="MOT_CLIENT_ID" type="text" autocomplete="off" spellcheck="false" placeholder="unchanged" /></label>
+          <label>Client secret <input id="MOT_CLIENT_SECRET" type="password" autocomplete="off" placeholder="unchanged" /></label>
+          <label>API key <input id="MOT_API_KEY" type="password" autocomplete="off" placeholder="unchanged" /></label>
+          <label>Token URL <input id="MOT_TOKEN_URL" type="text" autocomplete="off" spellcheck="false" placeholder="unchanged" /></label>
+          <button class="btn btn--ghost" id="saveCred" type="button">Save credentials</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2 class="eyebrow">Thoroughness</h2>
+        <div class="segmented" id="thoroughness" role="radiogroup" aria-label="Thoroughness">
+          <button role="radio" data-mode="fast" aria-checked="false">Fast</button>
+          <button role="radio" data-mode="balanced" aria-checked="true">Balanced</button>
+          <button role="radio" data-mode="thorough" aria-checked="false">Thorough</button>
+        </div>
+        <p class="hint" id="modeHint"></p>
+      </section>
+
+      <div class="controls">
+        <button class="btn btn--go" id="startBtn" type="button">
+          <span class="btn__label">Start inspection</span>
+        </button>
+        <button class="btn btn--stop" id="stopBtn" type="button" hidden>Stop</button>
+      </div>
+      <div class="progress" id="progressWrap" hidden>
+        <div class="progress__bar" id="progressBar"></div>
+        <span class="progress__label" id="progressLabel"></span>
+      </div>
+    </aside>
+
+    <!-- Results bay -->
+    <section class="results" id="results">
+      <div class="empty" id="empty">
+        <div class="empty__plate plate plate--front">
+          <span class="plate__gb">UK</span><span class="plate__reg">READY</span>
+        </div>
+        <p>No vehicles inspected yet.</p>
+        <p class="muted">Paste a search or listing link and start the inspection —
+          verified vehicles will stamp in here with their plate, price, distance and full MOT history.</p>
+      </div>
+      <div class="cards" id="cards"></div>
+
+      <div class="shelves" id="shelves" hidden>
+        <details class="shelf" id="dealerShelf" hidden>
+          <summary><span class="shelf__dot shelf__dot--dealer"></span>Dealer / trade plates <b id="dealerCount">0</b></summary>
+          <div class="shelf__list" id="dealerList"></div>
+        </details>
+        <details class="shelf" id="reviewShelf" hidden>
+          <summary><span class="shelf__dot shelf__dot--review"></span>Manual review <b id="reviewCount">0</b></summary>
+          <div class="shelf__list" id="reviewList"></div>
+        </details>
+      </div>
+
+      <details class="feed" id="feed">
+        <summary><span class="feed__tick"></span>Diagnostics feed</summary>
+        <pre class="feed__log" id="log" aria-live="polite"></pre>
+      </details>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
