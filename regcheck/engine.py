@@ -284,7 +284,7 @@ class Pipeline:
                 if plate not in image_votes:
                     self.log(f"[Read] Candidate plate: {plate}")
                 image_votes[plate] += 1
-            if contains_dealer_text(texts):
+            if contains_dealer_text(texts, exclude=(make, model)):
                 dealer_hits += 1
             # Plate shots are read first, so a plate seen in several photos is very
             # likely the real one - stop early to save time (unless disabled).
@@ -345,6 +345,16 @@ class Pipeline:
                                    "corrected": True, "tier": 3, "votes": None,
                                    **shape_vehicle(vehicle)})
                 self.n_success += 1
+                return
+            # Nothing verified. If the plate region read as dealer/trade branding
+            # (the ANPR models turn that into junk regs, so this is the tell), it's
+            # a dealer plate - no real reg was shown - not a read failure.
+            if dealer_hits >= DEALER_MIN_HITS:
+                self.log(f"[DEALER] Dealer/trade branding on the plate "
+                         f"({dealer_hits} image(s)); no real registration shown")
+                self.dealer.append((url, location))
+                self.emit({"type": "review", "category": "dealer", "url": url,
+                           "location": location, "site": site, "note": None})
                 return
             shortlist = ", ".join(f"{p}({v})" for p, v in ordered[:8])
             self.log(f"[FAILED] Read plate(s) but none verified: {shortlist}")

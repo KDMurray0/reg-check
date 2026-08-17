@@ -2,35 +2,29 @@
 
 Two halves:
 
-* Pure helpers (no third-party deps) that turn raw OCR fragments into canonical
-  UK registrations ("AB12 CDE"), correct common per-position OCR confusions, and
-  enumerate single-character "near-miss" variants for API recovery.
+* Pure helpers (no third-party deps) that normalise reads into canonical UK
+  registrations ("AB12 CDE"), correct per-position OCR confusions, apply the UK
+  age-code prior, and enumerate near-miss variants for API recovery.
 * The image pipeline (needs cv2 / numpy) that detects plates, builds enhanced
-  crop variants, and reads them with an ensemble of plate-specialised recognisers
-  plus an optional easyocr full-image backup.
-
-The reader returns a Counter of plate -> hits, so the caller can rank candidates
-by cross-photo consensus first and total agreement second.
+  crop variants, reads them with an ensemble of plate-specialised recognisers,
+  and votes per character (see `consensus_candidates`). easyocr, if present,
+  reads the crop for extra recall and for the dealer branding the plate-only
+  models can't (so a dealer plate is told apart from a genuine failure).
 """
 
 from __future__ import annotations
 
 import itertools
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 # Current-style UK plate: two letters, two digits, three letters ("AB12 CDE").
 PLATE_STRICT_RE = re.compile(r"^[A-Z]{2}[0-9]{2}[A-Z]{3}$")
 
-# Restrict OCR to plate characters - a real accuracy/speed win.
-PLATE_ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
 # Detector / recogniser tuning.
 DETECTION_TILES = 4      # also run detection on a 4x4 grid for small/far plates
 DETECTION_CONF = 0.12
-OCR_MAG_RATIO = 1.5
-OCR_DECODER = "beamsearch"
-OCR_BEAM_WIDTH = 8
+OCR_MAG_RATIO = 1.5      # easyocr magnification (reads small/angled text better)
 
 
 # --- Pure normalisation helpers --------------------------------------------
@@ -54,34 +48,6 @@ def _correct_plate(seq: str):
             p[i] = _LETTER_TO_DIGIT.get(p[i], p[i])
     s = "".join(p)
     return f"{s[:4]} {s[4:]}" if PLATE_STRICT_RE.match(s) else None
-
-
-def extract_plates(fragments) -> set[str]:
-    """Return canonical plate guesses ('AB12 CDE') from OCR fragments.
-
-    Only exactly-7-character tokens are considered - a whole fragment or a run of
-    consecutive fragments joined. Real current-style plates are exactly seven
-    characters, so this rejects the junk a sliding window over ordinary words
-    would invent (NISSAN, dealer banners...). Position confusions are then
-    corrected, recovering reads like 'MTI3UOC' -> 'MT13 UOC'.
-    """
-    if isinstance(fragments, str):
-        fragments = [fragments]
-    frs = [re.sub(r"[^A-Z0-9]", "", f.upper()) for f in fragments]
-    frs = [f for f in frs if f]
-    found: set[str] = set()
-    n = len(frs)
-    for i in range(n):
-        acc = ""
-        for j in range(i, min(i + 4, n)):   # join up to 4 consecutive fragments
-            acc += frs[j]
-            if len(acc) > 7:
-                break
-            if len(acc) == 7:
-                corrected = _correct_plate(acc)
-                if corrected:
-                    found.add(corrected)
-    return found
 
 
 # Visually-similar characters, kept within type so variants stay valid plates.
@@ -133,16 +99,35 @@ def plate_near_misses(plate: str):
 # Words that mark a detected "plate" as a dealer / trade placeholder rather than
 # a real registration (dealer name, website, trade plate).
 DEALER_KEYWORDS = (
-    "TRADE", "SALES", "MOTORS", "AUTOS", "AUTO", "GARAGE", "SPECIALIST",
-    "APPROVED", "WARRANTY", "FINANCE", "SHOWROOM", "CENTRE", "GROUP",
-    "MOTORING", "WWW", "COUK", "COM", "LTD", "FORSALE", "SOLD", "CARS",
+    "TRADE", "TRADER", "TRADERS", "SALES", "MOTORS", "MOTORGROUP", "AUTOS",
+    "AUTO", "AUTOMOTIVE", "GARAGE", "SPECIALIST", "APPROVED", "WARRANTY",
+    "FINANCE", "SHOWROOM", "CENTRE", "GROUP", "MOTORING", "COMMERCIAL",
+    "COMMERCIALS", "VEHICLE", "VEHICLES", "RANGE", "PRESTIGE", "SELECT",
+    "WWW", "COUK", "COM", "LTD", "FORSALE", "SOLD", "CARS",
 )
 
+# A standard reg's longest letter run is three (the LL..LLL groups). A 5+ letter
+# word on the plate is a dealer/trade/name plate - the threshold is 5 not 4 so an
+# occasional misread digit (CU07 -> "CUOT") doesn't look like branding.
+_DEALER_WORD_RE = re.compile(r"[A-Z]{5,}")
 
-def contains_dealer_text(texts) -> bool:
-    """True if any read text looks like dealer/trade branding, not a real plate."""
+
+def contains_dealer_text(texts, exclude=()) -> bool:
+    """True if a plate-region read looks like dealer/trade branding, not a reg.
+
+    Used to tell a dealer plate ("BM RANGE", "TOPGEAR MOTORGROUP") from a genuine
+    unreadable-plate failure once the DVSA check has found no real vehicle. Pass
+    the listing's make/model as `exclude` so the tailgate badge near the rear
+    plate (NISSAN, NAVARA) isn't mistaken for a dealer name.
+    """
     joined = " ".join(t.upper() for t in texts)
-    return any(kw in joined for kw in DEALER_KEYWORDS)
+    if any(kw in joined for kw in DEALER_KEYWORDS):
+        return True
+    ex = [e.upper() for e in exclude if e]
+    for word in _DEALER_WORD_RE.findall(joined):
+        if not any(word in e or e in word for e in ex):
+            return True
+    return False
 
 
 # --- Image pipeline (cv2 / numpy) ------------------------------------------
@@ -160,42 +145,6 @@ def decode_image(cv2, np, img_bytes):
         s = 1200.0 / w
         img = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
     return img
-
-
-def read_plate_candidates(img, engines, cv2, np):
-    """Read one image with every engine (maximum-accuracy pipeline).
-
-    Returns (plate_hits, texts):
-      plate_hits - Counter of canonical plate -> number of variant/model reads
-                   that produced it in THIS image (a within-image agreement score)
-      texts      - raw strings read from plate region(s), used to spot dealer text.
-
-    Pipeline: detect plates (full image + a tile grid so small/distant plates are
-    found) -> for each crop build enhanced variants (raw, CLAHE, deskew) -> read
-    every variant with the ENSEMBLE of recognisers. A full-image easyocr pass adds
-    recall for anything the detector misses.
-    """
-    plate_hits: Counter[str] = Counter()
-    texts: list[str] = []
-    detector = engines.get("detector")
-    plate_ocrs = engines.get("plate_ocrs") or []
-    reader = engines.get("easyocr")
-
-    for crop in _detect_plate_crops(detector, cv2, np, img):
-        for variant in _crop_variants(cv2, np, crop):
-            for pocr in plate_ocrs:
-                t = _plate_ocr_run(pocr, variant)
-                if t:
-                    texts.append(t)
-                    for plate in extract_plates([t]):
-                        plate_hits[plate] += 1
-
-    if reader is not None:  # full-image recall pass (NOT used for dealer text)
-        for plate in extract_plates(
-                _easyocr(reader, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))):
-            plate_hits[plate] += 1
-
-    return plate_hits, texts
 
 
 # --- Confidence-weighted character-level reading (primary) -----------------
@@ -228,15 +177,19 @@ def read_plate_reads(img, engines, cv2, np, enhanced=True):
                 raw, probs = _plate_ocr_conf(pocr, variant)
                 if not raw:
                     continue
-                texts.append(re.sub(r"[^A-Z0-9]", "", raw.upper()))
                 r = _clean_read(raw, probs)
                 if r:
                     reads.append(r)
-
-    if reader is not None:  # full-image easyocr backup, with its box confidence
-        for chars, conf in _easyocr_conf(
-                reader, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)):
-            reads.append((chars, [conf] * 7))
+        # easyocr reads whatever is written on the plate region - real reg chars
+        # (extra recall) AND the dealer/trade branding the plate-only recognisers
+        # can't ("TOPGEAR MOTORGROUP", "BM RANGE"), which is how a dealer plate is
+        # told apart from a genuine unreadable-plate failure.
+        if reader is not None:
+            for word in _easyocr_words(reader, cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)):
+                texts.append(word)
+                alnum = re.sub(r"[^A-Z0-9]", "", word)
+                if len(alnum) == 7:
+                    reads.append((alnum, [0.5] * 7))
 
     return reads, texts
 
@@ -264,20 +217,16 @@ def _plate_ocr_conf(plate_ocr, gray):
         return "", None
 
 
-def _easyocr_conf(reader, gray):
-    """easyocr reads as (7-char string, confidence) pairs."""
-    out = []
+def _easyocr_words(reader, gray):
+    """Every text token easyocr reads on the plate crop, uppercased (words kept,
+    so dealer branding like 'RANGE' survives for dealer-plate detection)."""
     try:
-        for _box, text, conf in reader.readtext(
-                gray, detail=1, paragraph=False, allowlist=PLATE_ALLOWLIST,
-                decoder=OCR_DECODER, beamWidth=OCR_BEAM_WIDTH,
-                mag_ratio=OCR_MAG_RATIO):
-            t = re.sub(r"[^A-Z0-9]", "", (text or "").upper())
-            if len(t) == 7:
-                out.append((t, float(conf)))
+        out = reader.readtext(gray, detail=0, paragraph=False,
+                              mag_ratio=OCR_MAG_RATIO)
+        return [re.sub(r"[^A-Z0-9 ]", "", (t or "").upper()).strip()
+                for t in out if t and t.strip()]
     except Exception:
-        pass
-    return out
+        return []
 
 
 def consensus_candidates(reads, max_candidates=12, age_prior=True):
@@ -463,22 +412,3 @@ def _deskew(cv2, np, crop):
     return None
 
 
-def _plate_ocr_run(plate_ocr, gray) -> str:
-    try:
-        preds = plate_ocr.run(gray)
-        pred = preds[0] if isinstance(preds, list) and preds else preds
-        txt = getattr(pred, "plate", None) or (pred if isinstance(pred, str)
-                                               else "")
-        return (txt or "").replace("_", "").upper()
-    except Exception:
-        return ""
-
-
-def _easyocr(reader, gray) -> list[str]:
-    """easyocr beam-search read restricted to plate characters."""
-    try:
-        return reader.readtext(
-            gray, detail=0, paragraph=False, allowlist=PLATE_ALLOWLIST,
-            decoder=OCR_DECODER, beamWidth=OCR_BEAM_WIDTH, mag_ratio=OCR_MAG_RATIO)
-    except Exception:
-        return []
