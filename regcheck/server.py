@@ -18,6 +18,7 @@ from flask import Flask, Response, request, send_from_directory, stream_with_con
 
 from .engine import Pipeline
 from .mot import MOTClient
+from .review import DEFAULT_BASE_URL, DEFAULT_MODEL, run_tournament
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(ROOT, "reg_check_config.json")
@@ -90,6 +91,20 @@ broker = Broker()
 run_lock = threading.Lock()
 state = {"running": False, "stop_event": None}
 
+# Verified vehicles from the most recent run, kept so the AI review can use them.
+last_results: list = []
+
+review_broker = Broker()
+review_lock = threading.Lock()
+review_state = {"running": False}
+
+
+def _capture_emit(ev):
+    """Publish a pipeline event, keeping verified results for the AI review."""
+    if ev.get("type") == "result":
+        last_results.append(ev["result"])
+    broker.publish(ev)
+
 
 # --- routes -----------------------------------------------------------------
 
@@ -142,8 +157,9 @@ def post_run():
                         effective("MOT_API_KEY"), effective("MOT_TOKEN_URL"))
         stop_event = threading.Event()
         broker.reset()
+        last_results.clear()
         state.update(running=True, stop_event=stop_event)
-        pipeline = Pipeline(urls, mot, broker.publish, stop_event, OUTPUT_FILE,
+        pipeline = Pipeline(urls, mot, _capture_emit, stop_event, OUTPUT_FILE,
                             options)
         threading.Thread(target=_worker, args=(pipeline,), daemon=True).start()
     return {"ok": True, "count": len(urls), "verified": mot.configured}
@@ -184,6 +200,77 @@ def _worker(pipeline: Pipeline):
     finally:
         with run_lock:
             state["running"] = False
+
+
+# --- AI review (local LLM tournament) ---------------------------------------
+
+@app.get("/api/llm-config")
+def get_llm_config():
+    return {"base_url": effective("LLM_BASE_URL") or DEFAULT_BASE_URL,
+            "model": effective("LLM_MODEL") or DEFAULT_MODEL,
+            "results": len(last_results), "running": review_state["running"]}
+
+
+@app.post("/api/review")
+def post_review():
+    with review_lock:
+        if review_state["running"]:
+            return {"error": "A review is already running."}, 409
+        if not last_results:
+            return {"error": "Run an inspection first - no verified trucks yet."}, 400
+        body = request.get_json(silent=True) or {}
+        base_url = (body.get("base_url") or effective("LLM_BASE_URL")
+                    or DEFAULT_BASE_URL).strip()
+        model = (body.get("model") or effective("LLM_MODEL") or DEFAULT_MODEL).strip()
+        cfg = load_config()
+        cfg["LLM_BASE_URL"], cfg["LLM_MODEL"] = base_url, model
+        try:
+            save_config(cfg)
+        except Exception:
+            pass
+        vehicles = list(last_results)
+        review_state["running"] = True
+        review_broker.reset()
+        threading.Thread(target=_review_worker,
+                         args=(vehicles, base_url, model), daemon=True).start()
+    return {"ok": True, "count": len(vehicles), "model": model}
+
+
+def _review_worker(vehicles, base_url, model):
+    def log(text):
+        review_broker.publish({"type": "log", "text": text})
+    try:
+        log(f"[Review] Reviewing {len(vehicles)} verified truck(s) with {model} "
+            f"(Swiss-system - every truck is compared, none dropped)...")
+        result = run_tournament(vehicles, base_url, model, log=log)
+        review_broker.publish({"type": "shortlist", "model": model, **result})
+    except Exception as exc:
+        review_broker.publish({"type": "log", "text": f"[Review] Failed: {exc!r}"})
+        review_broker.publish({"type": "shortlist", "shortlist": [],
+                               "leaderboard": [], "error": str(exc)})
+    finally:
+        review_broker.publish({"type": "done"})
+        with review_lock:
+            review_state["running"] = False
+
+
+@app.get("/api/review/stream")
+def review_stream():
+    @stream_with_context
+    def gen():
+        q, history = review_broker.subscribe()
+        try:
+            for ev in history:
+                yield _sse(ev)
+            while True:
+                try:
+                    yield _sse(q.get(timeout=15))
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+        finally:
+            review_broker.unsubscribe(q)
+    return Response(gen(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def _clean_options(opts: dict) -> dict:

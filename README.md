@@ -10,7 +10,8 @@ price, distance/location and full MOT history. Results are also written to
 
 It runs entirely on your machine: a thin Flask server drives Playwright + a
 dedicated ANPR plate-reading pipeline, and a single designed page shows progress
-live over Server-Sent Events.
+live over Server-Sent Events. An optional local LLM can then review the verified
+trucks and shortlist the best buys (see **AI shortlist** below).
 
 ## Setup (Windows)
 
@@ -65,6 +66,27 @@ every photo with no early stop — use it when a plate is being missed.
 Verified vehicles appear as cards; listings with a dealer/trade placeholder plate,
 or where no plate could be verified, drop into the **Dealer / trade plates** and
 **Manual review** shelves — open those and check the photos yourself.
+
+## AI shortlist — local LLM review (optional)
+
+Once a run has verified some trucks, **AI shortlist** has a local model review them
+and rank the best buys, weighing year, mileage, price, distance and the full MOT
+history (failures, dangerous defects, recurring advisories, mileage consistency).
+
+It's a **Swiss-system tournament**, not a knockout: every truck is compared against
+its peers over several rounds and earns points by placement, with the group
+boundaries shifting each round so a borderline truck meets the rivals it just
+missed. Nothing is ever eliminated — you get a **full leaderboard of every truck**
+plus written-up **pros & cons for the top ~10**, with a *best buy* highlighted. If
+the model returns something unparseable for a group, that group keeps its current
+order, so a flaky reply never drops a truck.
+
+Point it at any **OpenAI-compatible** endpoint — [Ollama](https://ollama.com)
+(default `http://localhost:11434/v1`), LM Studio, llama.cpp or vLLM — and set the
+**model** name in the panel. Good local choices on a 24 GB GPU: `qwen2.5:32b` or
+`qwen3.6:27b` for the sharpest judgement, `gemma3:12b` for speed with a big context.
+The tournament batches the trucks, so context size is never the limit and accuracy,
+not speed, is what matters. No API keys or cloud calls — it stays on your machine.
 
 ## DVSA MOT History API — free, official
 

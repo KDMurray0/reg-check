@@ -135,6 +135,8 @@ function resetView() {
   updateTallies();
   $('#progressBar').style.width = '0%';
   $('#progressLabel').textContent = '';
+  $('#shortlistSection').hidden = true;
+  updateReviewAvailability(0);
 }
 
 /* ---- SSE --------------------------------------------------------------- */
@@ -172,6 +174,7 @@ function onDone(s) {
   if (!$('#cards').children.length && $('#dealerShelf').hidden && $('#reviewShelf').hidden) {
     $('#empty').hidden = false;
   }
+  updateReviewAvailability(tallies.verified);
 }
 
 function setProgress(cur, total) {
@@ -284,10 +287,120 @@ function renderReview(ev) {
   $(isDealer ? '#dealerList' : '#reviewList').appendChild(item);
 }
 
+/* ---- AI review (local LLM tournament) ---------------------------------- */
+let reviewEs = null;
+
+async function loadLlmConfig() {
+  try {
+    const d = await (await fetch('/api/llm-config')).json();
+    if (!$('#llmModel').value) $('#llmModel').value = d.model || '';
+    if (!$('#llmBaseUrl').value) $('#llmBaseUrl').value = d.base_url || '';
+    updateReviewAvailability(d.results || 0);
+    if (d.running) { setReviewRunning(true); attachReviewStream(); }
+  } catch { /* server not up yet */ }
+}
+
+function updateReviewAvailability(n) {
+  const pill = $('#reviewCountPill');
+  pill.textContent = `${n} truck${n === 1 ? '' : 's'}`;
+  pill.dataset.ok = n > 0 ? 'true' : 'false';
+  $('#reviewBtn').disabled = n < 1;
+}
+
+$('#llmAdvToggle').addEventListener('click', (e) => {
+  const f = $('#llmUrlField');
+  f.hidden = !f.hidden;
+  e.target.setAttribute('aria-expanded', String(!f.hidden));
+});
+
+$('#reviewBtn').addEventListener('click', startReview);
+
+async function startReview() {
+  setReviewRunning(true);
+  $('#reviewStatus').textContent = 'Reviewing every verified truck…';
+  try {
+    const r = await fetch('/api/review', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: $('#llmModel').value.trim(),
+                             base_url: $('#llmBaseUrl').value.trim() }),
+    });
+    const d = await r.json();
+    if (!r.ok) { $('#reviewStatus').textContent = d.error || 'Could not start review'; setReviewRunning(false); return; }
+    attachReviewStream();
+  } catch { $('#reviewStatus').textContent = 'Server not reachable'; setReviewRunning(false); }
+}
+
+function setReviewRunning(on) {
+  $('#reviewBtn').disabled = on;
+  $('#reviewBtn').textContent = on ? 'Reviewing…' : 'Shortlist trucks';
+}
+
+function attachReviewStream() {
+  if (reviewEs) reviewEs.close();
+  reviewEs = new EventSource('/api/review/stream');
+  reviewEs.onmessage = (m) => {
+    let ev; try { ev = JSON.parse(m.data); } catch { return; }
+    if (ev.type === 'log') { appendLog(ev.text); $('#reviewStatus').textContent = ev.text.replace(/^\[Review\]\s*/, ''); }
+    else if (ev.type === 'shortlist') renderShortlist(ev);
+    else if (ev.type === 'done') { setReviewRunning(false); $('#reviewStatus').textContent = 'Shortlist ready.'; if (reviewEs) { reviewEs.close(); reviewEs = null; } }
+  };
+  reviewEs.onerror = () => {};
+}
+
+function renderShortlist(ev) {
+  if (ev.error) { $('#reviewStatus').textContent = 'Review error: ' + ev.error; return; }
+  const cards = $('#shortlistCards');
+  cards.innerHTML = '';
+  (ev.shortlist || []).forEach((r) => cards.appendChild(shortlistCard(r)));
+  $('#shortlistModel').textContent = ev.model ? `· ${ev.model}` : '';
+  renderLeaderboard(ev.leaderboard || []);
+  $('#shortlistSection').hidden = false;
+  $('#shortlistSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function shortlistCard(r) {
+  const el = document.createElement('div');
+  el.className = 'sl-card' + (r.best ? ' sl-card--best' : '');
+  const meta = [r.year, r.mileage, r.location].filter(Boolean).map(esc).join(' · ');
+  el.innerHTML = `
+    <div class="sl-card__head">
+      <span class="sl-rank">${r.best ? 'BEST BUY' : '#' + r.rank}</span>
+      <a class="sl-plate" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">
+        ${plateHTML(r.plate, false)}</a>
+      <span class="sl-price">${esc(r.price || 'N/A')}</span>
+    </div>
+    <div class="sl-meta">${meta}</div>
+    ${r.verdict ? `<p class="sl-verdict">${esc(r.verdict)}</p>` : ''}
+    <div class="sl-pc">
+      <ul class="sl-pros">${(r.pros || []).map((p) => `<li>${esc(p)}</li>`).join('')}</ul>
+      <ul class="sl-cons">${(r.cons || []).map((c) => `<li>${esc(c)}</li>`).join('')}</ul>
+    </div>`;
+  return el;
+}
+
+function renderLeaderboard(rows) {
+  if (!rows.length) { $('#leaderboard').hidden = true; return; }
+  $('#leaderCount').textContent = rows.length;
+  const body = rows.map((r) => `<tr>
+    <td class="lb-rank">${r.rank}</td>
+    <td><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.plate)}</a></td>
+    <td class="lb-num">${esc(r.price || '')}</td>
+    <td class="lb-num">${esc(String(r.year || ''))}</td>
+    <td class="lb-num">${esc(r.mileage || '')}</td>
+    <td>${esc(r.location || '')}</td>
+    <td class="lb-note">${esc(r.note || '')}</td>
+    <td class="lb-num">${esc(String(r.points))}</td></tr>`).join('');
+  $('#leaderTable').innerHTML =
+    `<thead><tr><th>#</th><th>Reg</th><th>Price</th><th>Year</th><th>Mileage</th>` +
+    `<th>Where</th><th>MOT notes</th><th>Pts</th></tr></thead><tbody>${body}</tbody>`;
+  $('#leaderboard').hidden = false;
+}
+
 /* ---- boot -------------------------------------------------------------- */
 initTheme();
 setMode('balanced');
 loadConfig();
+loadLlmConfig();
 fetch('/api/state').then((r) => r.json()).then((d) => {
   if (d.running) { setRunning(true); attachStream(); }
 }).catch(() => {});

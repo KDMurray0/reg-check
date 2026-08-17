@@ -73,6 +73,22 @@ https://www.cazoo.co.uk/vans/nissan/navara/"></textarea>
         <div class="progress__bar" id="progressBar"></div>
         <span class="progress__label" id="progressLabel"></span>
       </div>
+
+      <section class="panel" id="reviewPanel">
+        <div class="panel__head">
+          <h2 class="eyebrow">AI shortlist</h2>
+          <span class="conn" id="reviewCountPill" data-ok="false">0 trucks</span>
+        </div>
+        <p class="hint">A local model reviews every verified truck Swiss-tournament
+          style — nothing dropped — and shortlists the best buys with pros &amp; cons.</p>
+        <label class="field">Model
+          <input id="llmModel" type="text" spellcheck="false" placeholder="qwen3.6:27b" /></label>
+        <button class="link-btn" id="llmAdvToggle" type="button" aria-expanded="false">Endpoint</button>
+        <label class="field" id="llmUrlField" hidden>Base URL
+          <input id="llmBaseUrl" type="text" spellcheck="false" placeholder="http://localhost:11434/v1" /></label>
+        <button class="btn btn--review" id="reviewBtn" type="button" disabled>Shortlist trucks</button>
+        <p class="hint" id="reviewStatus"></p>
+      </section>
     </aside>
 
     <!-- Results bay -->
@@ -86,6 +102,17 @@ https://www.cazoo.co.uk/vans/nissan/navara/"></textarea>
           verified vehicles will stamp in here with their plate, price, distance and full MOT history.</p>
       </div>
       <div class="cards" id="cards"></div>
+
+      <section class="shortlist" id="shortlistSection" hidden>
+        <div class="shortlist__head">
+          <h2 class="eyebrow">AI shortlist <span id="shortlistModel" class="shortlist__model"></span></h2>
+        </div>
+        <div class="shortlist__cards" id="shortlistCards"></div>
+        <details class="leaderboard" id="leaderboard" hidden>
+          <summary><span class="feed__tick"></span>Full leaderboard — every truck ranked, none dropped <b id="leaderCount">0</b></summary>
+          <div class="leaderboard__wrap"><table class="leaderboard__table" id="leaderTable"></table></div>
+        </details>
+      </section>
 
       <div class="shelves" id="shelves" hidden>
         <details class="shelf" id="dealerShelf" hidden>

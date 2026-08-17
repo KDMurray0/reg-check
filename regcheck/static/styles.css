@@ -392,11 +392,76 @@ b { font-weight: 700; }
   white-space: pre-wrap; word-break: break-word;
 }
 
+/* ---- AI review panel + shortlist --------------------------------------- */
+.field { display: grid; gap: 4px; margin-top: 10px; font-size: 11.5px; color: var(--muted); }
+.field input {
+  background: var(--ink-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 8px 10px; font-family: var(--font-mono); font-size: 12.5px;
+}
+.btn--review {
+  width: 100%; margin-top: 12px; color: #fff; font-size: 15px; padding: 12px;
+  background: linear-gradient(180deg, #2f6bff, var(--gb-blue));
+  box-shadow: 0 4px 0 #06256e, var(--shadow-sm);
+}
+.btn--review:active { box-shadow: 0 1px 0 #06256e; }
+.btn--review:disabled { filter: grayscale(.5) brightness(.75); cursor: default; box-shadow: none; }
+
+.shortlist { display: grid; gap: 12px; }
+.shortlist__model { font-family: var(--font-mono); font-size: 11px; color: var(--muted-2);
+  letter-spacing: .04em; text-transform: none; }
+.shortlist__cards { display: grid; gap: 12px; }
+
+.sl-card {
+  background: linear-gradient(180deg, var(--panel), color-mix(in srgb, var(--panel) 90%, #000));
+  border: 1px solid var(--line); border-radius: var(--r-lg); padding: 14px 16px;
+  box-shadow: var(--shadow-sm); animation: stampIn .25s cubic-bezier(.2,.8,.2,1);
+}
+.sl-card--best { border-color: color-mix(in srgb, var(--plate-yellow) 55%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--plate-yellow) 40%, transparent), var(--shadow); }
+.sl-card__head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sl-rank {
+  font-family: var(--font-cond); font-weight: 800; letter-spacing: .1em; text-transform: uppercase;
+  font-size: 12px; color: var(--muted); padding: 3px 8px; border: 1px solid var(--line-2);
+  border-radius: 999px; white-space: nowrap;
+}
+.sl-card--best .sl-rank { color: #16130A; background: var(--plate-yellow); border-color: transparent; }
+.sl-plate { text-decoration: none; }
+.sl-plate .plate { font-size: 20px; }
+.sl-price { margin-left: auto; font-family: var(--font-mono); font-weight: 700; font-size: 20px; }
+.sl-meta { font-family: var(--font-mono); font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+.sl-verdict { margin: 10px 0 0; font-size: 14px; line-height: 1.5; }
+.sl-pc { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 18px; margin-top: 10px; }
+.sl-pros, .sl-cons { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; align-content: start; }
+.sl-pros li, .sl-cons li { font-size: 12.5px; line-height: 1.4; padding-left: 16px; position: relative; color: var(--muted); }
+.sl-pros li::before { content: "+"; position: absolute; left: 0; color: var(--pass); font-weight: 700; }
+.sl-cons li::before { content: "−"; position: absolute; left: 0; color: var(--fail); font-weight: 700; }
+
+.leaderboard { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-md); }
+.leaderboard > summary {
+  cursor: pointer; padding: 12px 16px; font-family: var(--font-cond); text-transform: uppercase;
+  letter-spacing: .12em; font-size: 12.5px; color: var(--muted); display: flex; align-items: center;
+  gap: 10px; list-style: none;
+}
+.leaderboard > summary::-webkit-details-marker { display: none; }
+.leaderboard > summary b { margin-left: auto; color: var(--text); font-family: var(--font-mono); }
+.leaderboard__wrap { overflow-x: auto; padding: 0 12px 12px; }
+.leaderboard__table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 11.5px; }
+.leaderboard__table th { text-align: left; color: var(--muted-2); font-weight: 600; padding: 6px 8px;
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+.leaderboard__table td { padding: 6px 8px; border-bottom: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.leaderboard__table tr:first-child td { color: var(--text); }
+.leaderboard__table a { color: var(--gb-blue); text-decoration: none; }
+:root:not([data-theme="light"]) .leaderboard__table a { color: #7FA6FF; }
+.lb-rank { color: var(--text); font-weight: 700; }
+.lb-num { text-align: right; }
+.lb-note { white-space: normal; min-width: 160px; }
+
 /* ---- responsive -------------------------------------------------------- */
 @media (max-width: 900px) {
   .bay { grid-template-columns: 1fr; }
   .console { position: static; }
   .card__price { margin-left: 0; }
+  .sl-pc { grid-template-columns: 1fr; }
 }
 
 /* ---- motion ------------------------------------------------------------ */
