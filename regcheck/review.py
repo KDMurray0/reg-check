@@ -1,18 +1,20 @@
 """Tournament MOT review with a local LLM.
 
-Once the inspection has verified a set of trucks, a local model (via any
+Once the inspection has verified a set of vehicles, a local model (via any
 OpenAI-compatible endpoint - Ollama, LM Studio, llama.cpp, vLLM) reviews them and
 shortlists the best buys, weighing year, mileage, price, distance and the full
 MOT history (failures, dangerous defects, recurring advisories, mileage
 consistency).
 
 It runs as a Swiss-system tournament (as chess and LLM-arena leaderboards do) so
-no vehicle is ever eliminated: every truck is compared in small peer groups over
-several rounds, earning points by placement, and the band boundaries shift each
-round so a borderline truck meets the rivals it just missed. Every vehicle ends
-up on a full leaderboard; the top few get written-up pros and cons. If the model
-returns unparseable output for a group, that group keeps its current (heuristic)
-order, so a flaky reply never drops or blindly reshuffles a truck.
+no vehicle is ever eliminated: every vehicle is compared in small peer groups over
+several rounds and earns an Elo rating from the head-to-head results, with the
+group boundaries shifting each round so a borderline vehicle meets the rivals it
+just missed. Because an Elo win over a weak group counts for little, a vehicle
+can't top the table just by beating weak peers. Every vehicle ends up on a full
+leaderboard; the top few get written-up pros and cons. If the model returns
+unparseable output for a group, that group keeps its current order, so a flaky
+reply never drops or blindly reshuffles a vehicle.
 """
 
 from __future__ import annotations
@@ -25,8 +27,8 @@ import requests
 
 DEFAULT_BASE_URL = "http://localhost:11434/v1"   # Ollama's OpenAI-compatible API
 DEFAULT_MODEL = "qwen3.6:27b"
-BATCH_SIZE = 6          # trucks compared per peer group (small = reliable ranking)
-ROUNDS = 3              # Swiss rounds - every truck is ranked in each
+BATCH_SIZE = 6          # vehicles compared per peer group (small = reliable ranking)
+ROUNDS = 3              # Swiss rounds - every vehicle is ranked in each
 _NOW_YEAR = datetime.date.today().year
 
 # Recurring-issue themes worth surfacing to the model / buyer.
@@ -174,7 +176,7 @@ def _extract_json(text):
 # --- Swiss-system tournament (no elimination) -------------------------------
 
 _RANK_SYS = ("You are a shrewd UK used-vehicle buyer's analyst. You judge each "
-             "truck overall - price, age, mileage, mechanical condition from the "
+             "vehicle overall - price, age, mileage, mechanical condition from the "
              "MOT record (failures, dangerous defects, recurring advisories, "
              "mileage consistency) and distance - and you decide for yourself how "
              "much price matters versus condition. If the buyer states priorities, "
@@ -207,12 +209,12 @@ def _heuristic_score(v):
 
 def _llm_rank(chat, band, log, brief=""):
     """Order one peer group best->worst; return ids in that order. On any parse
-    failure the band keeps its incoming order, so a truck is never dropped."""
+    failure the band keeps its incoming order, so a vehicle is never dropped."""
     ids = [i for i, _ in band]
     if len(band) < 2:
         return ids
     dossiers = "\n".join(compact_dossier(i, v) for i, v in band)
-    prompt = (f"Rank these {len(band)} used trucks from best buy to worst, all "
+    prompt = (f"Rank these {len(band)} used vehicles from best buy to worst, all "
               f"things considered - weigh price, value, MOT/mechanical condition "
               f"and distance however you judge best.{_brief_clause(brief)}\n"
               f"{dossiers}\n\n"
@@ -241,7 +243,7 @@ def _llm_rank(chat, band, log, brief=""):
 
 def _bands(order, size, offset):
     """Consecutive peer groups of `size`, shifted by `offset` so band edges move
-    between rounds and borderline trucks meet the rivals they just missed."""
+    between rounds and borderline vehicles meet the rivals they just missed."""
     seq = list(order)
     if offset and len(seq) > offset:
         yield seq[:offset]
@@ -250,28 +252,41 @@ def _bands(order, size, offset):
         yield seq[k:k + size]
 
 
+_ELO_K = 16          # rating step per pairwise comparison
+
+
 def _swiss(indexed, chat, batch_size, rounds, log, brief=""):
-    """Swiss-system placement points for every vehicle - none eliminated."""
+    """Elo ratings from within-group pairwise comparisons - no elimination.
+
+    Each round groups vehicles of similar rating, the model ranks the group, and
+    every pair in that ranking updates Elo (earlier beats later). Because an Elo
+    win over a low-rated peer barely moves the needle, a vehicle can't reach the
+    top just by topping a weak group - it has to out-rank genuinely strong rivals,
+    which Swiss pairing keeps feeding it. Ratings seed from the value heuristic in
+    round one only (all start equal, tie-broken by heuristic)."""
     by_id = dict(indexed)
     heur = {i: _heuristic_score(v) for i, v in indexed}
-    points = {i: 0.0 for i, _ in indexed}
+    rating = {i: 1000.0 for i, _ in indexed}
     for r in range(rounds):
-        order = sorted(points, key=lambda i: (points[i], heur[i]), reverse=True)
+        order = sorted(rating, key=lambda i: (rating[i], heur[i]), reverse=True)
         offset = (batch_size // 2) if (r % 2) else 0
-        bands = [b for b in _bands(order, batch_size, offset) if b]
+        bands = [b for b in _bands(order, batch_size, offset) if len(b) >= 2]
         log(f"[Review] Round {r + 1}/{rounds}: comparing {len(bands)} peer group(s)...")
         for band in bands:
             ranked = _llm_rank(chat, [(i, by_id[i]) for i in band], log, brief)
-            n = len(ranked)
-            for pos, i in enumerate(ranked):
-                points[i] += (n - pos)         # placement points, best gets most
-    final = sorted(points, key=lambda i: (points[i], heur[i]), reverse=True)
-    return final, points
+            for a in range(len(ranked)):        # best -> worst: earlier beats later
+                for b in range(a + 1, len(ranked)):
+                    wi, li = ranked[a], ranked[b]
+                    exp = 1.0 / (1.0 + 10 ** ((rating[li] - rating[wi]) / 400.0))
+                    rating[wi] += _ELO_K * (1 - exp)
+                    rating[li] -= _ELO_K * (1 - exp)
+    final = sorted(rating, key=lambda i: (rating[i], heur[i]), reverse=True)
+    return final, rating
 
 
 def _review_one(chat, v, log, brief=""):
-    """A verdict and pros/cons for one truck (small, reliable prompt)."""
-    prompt = ("Assess this used truck for a buyer in one short line, then give its "
+    """A verdict and pros/cons for one vehicle (small, reliable prompt)."""
+    prompt = ("Assess this used vehicle for a buyer in one short line, then give its "
               "pros and cons - each under 12 words, concrete about price, mileage, "
               f"year and MOT findings.{_brief_clause(brief)}\n{full_dossier(0, v)}\n\n"
               'Reply ONLY as JSON: {"verdict": "<one sentence>", "pros": ["..."], '
@@ -356,7 +371,7 @@ def run_tournament(vehicles, base_url, model, log, api_key=None,
     by_id = dict(indexed)
     if len(indexed) <= batch_size:
         rounds = 1                         # one comparison already sees them all
-    final, points = _swiss(indexed, chat, batch_size, rounds, log, brief)
+    final, rating = _swiss(indexed, chat, batch_size, rounds, log, brief)
 
     leaderboard = []
     for rank, i in enumerate(final, start=1):
@@ -366,7 +381,7 @@ def run_tournament(vehicles, base_url, model, log, api_key=None,
             "price": v.get("price"), "year": d["year"],
             "mileage": v.get("latestMileage"), "location": v.get("location"),
             "url": v.get("url"), "site": v.get("site"),
-            "points": round(points[i], 1), "note": _leader_note(v)})
+            "rating": round(rating[i]), "note": _leader_note(v)})
 
     top = final[:shortlist]
     log(f"[Review] Writing pros & cons for the top {len(top)}...")
