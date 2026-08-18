@@ -173,10 +173,17 @@ def _extract_json(text):
 
 # --- Swiss-system tournament (no elimination) -------------------------------
 
-_RANK_SYS = ("You are a shrewd UK used-vehicle buyer's analyst. You judge value "
-             "for money: price against age and mileage, mechanical condition from "
-             "the MOT record (failures, dangerous defects, recurring advisories, "
-             "mileage consistency) and how far away the vehicle is.")
+_RANK_SYS = ("You are a shrewd UK used-vehicle buyer's analyst. You judge each "
+             "truck overall - price, age, mileage, mechanical condition from the "
+             "MOT record (failures, dangerous defects, recurring advisories, "
+             "mileage consistency) and distance - and you decide for yourself how "
+             "much price matters versus condition. If the buyer states priorities, "
+             "weight your judgement toward them.")
+
+
+def _brief_clause(brief):
+    brief = (brief or "").strip()
+    return f"\n\nThe buyer's priorities (weight these): {brief}\n" if brief else "\n"
 
 
 def _heuristic_score(v):
@@ -198,7 +205,7 @@ def _heuristic_score(v):
     return round(max(1, min(100, s)), 1)
 
 
-def _llm_rank(chat, band, log):
+def _llm_rank(chat, band, log, brief=""):
     """Order one peer group best->worst; return ids in that order. On any parse
     failure the band keeps its incoming order, so a truck is never dropped."""
     ids = [i for i, _ in band]
@@ -206,8 +213,9 @@ def _llm_rank(chat, band, log):
         return ids
     dossiers = "\n".join(compact_dossier(i, v) for i, v in band)
     prompt = (f"Rank these {len(band)} used trucks from best buy to worst, all "
-              f"things considered - value for money, MOT/mechanical condition, and "
-              f"distance.\n\n{dossiers}\n\n"
+              f"things considered - weigh price, value, MOT/mechanical condition "
+              f"and distance however you judge best.{_brief_clause(brief)}\n"
+              f"{dossiers}\n\n"
               f"Reply ONLY with a JSON array of the id numbers, best first "
               f"(e.g. [{ids[1]},{ids[0]}]). Include every id exactly once.")
     try:
@@ -242,7 +250,7 @@ def _bands(order, size, offset):
         yield seq[k:k + size]
 
 
-def _swiss(indexed, chat, batch_size, rounds, log):
+def _swiss(indexed, chat, batch_size, rounds, log, brief=""):
     """Swiss-system placement points for every vehicle - none eliminated."""
     by_id = dict(indexed)
     heur = {i: _heuristic_score(v) for i, v in indexed}
@@ -253,7 +261,7 @@ def _swiss(indexed, chat, batch_size, rounds, log):
         bands = [b for b in _bands(order, batch_size, offset) if b]
         log(f"[Review] Round {r + 1}/{rounds}: comparing {len(bands)} peer group(s)...")
         for band in bands:
-            ranked = _llm_rank(chat, [(i, by_id[i]) for i in band], log)
+            ranked = _llm_rank(chat, [(i, by_id[i]) for i in band], log, brief)
             n = len(ranked)
             for pos, i in enumerate(ranked):
                 points[i] += (n - pos)         # placement points, best gets most
@@ -261,11 +269,11 @@ def _swiss(indexed, chat, batch_size, rounds, log):
     return final, points
 
 
-def _review_one(chat, v, log):
+def _review_one(chat, v, log, brief=""):
     """A verdict and pros/cons for one truck (small, reliable prompt)."""
     prompt = ("Assess this used truck for a buyer in one short line, then give its "
               "pros and cons - each under 12 words, concrete about price, mileage, "
-              f"year and MOT findings.\n\n{full_dossier(0, v)}\n\n"
+              f"year and MOT findings.{_brief_clause(brief)}\n{full_dossier(0, v)}\n\n"
               'Reply ONLY as JSON: {"verdict": "<one sentence>", "pros": ["..."], '
               '"cons": ["..."]} with 2-4 of each.')
     try:
@@ -335,9 +343,10 @@ def _leader_note(v):
 
 
 def run_tournament(vehicles, base_url, model, log, api_key=None,
-                   batch_size=BATCH_SIZE, rounds=ROUNDS, shortlist=10):
-    """Swiss-system review of EVERY vehicle. Returns
-    {"shortlist": [...detailed...], "leaderboard": [...all, ranked...]}."""
+                   batch_size=BATCH_SIZE, rounds=ROUNDS, shortlist=10, brief=""):
+    """Swiss-system review of EVERY vehicle. `brief` is the buyer's free-text
+    priorities (empty = the model weighs price and value as it judges best).
+    Returns {"shortlist": [...detailed...], "leaderboard": [...all, ranked...]}."""
     def chat(messages):
         return llm_chat(base_url, model, messages, api_key=api_key)
 
@@ -347,7 +356,7 @@ def run_tournament(vehicles, base_url, model, log, api_key=None,
     by_id = dict(indexed)
     if len(indexed) <= batch_size:
         rounds = 1                         # one comparison already sees them all
-    final, points = _swiss(indexed, chat, batch_size, rounds, log)
+    final, points = _swiss(indexed, chat, batch_size, rounds, log, brief)
 
     leaderboard = []
     for rank, i in enumerate(final, start=1):
@@ -364,6 +373,6 @@ def run_tournament(vehicles, base_url, model, log, api_key=None,
     rows = []
     for rank, i in enumerate(top, start=1):
         rows.append(_shortlist_row(rank, by_id[i],
-                    *_review_one(chat, by_id[i], log), best=(rank == 1)))
+                    *_review_one(chat, by_id[i], log, brief), best=(rank == 1)))
     log("[Review] Shortlist ready.")
     return {"shortlist": rows, "leaderboard": leaderboard}

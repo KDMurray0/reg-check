@@ -171,15 +171,16 @@ def read_plate_reads(img, engines, cv2, np, enhanced=True):
     plate_ocrs = engines.get("plate_ocrs") or []
     reader = engines.get("easyocr")
 
-    for crop in _detect_plate_crops(detector, cv2, np, img):
+    for crop, weight in _detect_plate_crops(detector, cv2, np, img):
         for variant in _crop_variants(cv2, np, crop, enhanced):
             for pocr in plate_ocrs:
                 raw, probs = _plate_ocr_conf(pocr, variant)
                 if not raw:
                     continue
                 r = _clean_read(raw, probs)
-                if r:
-                    reads.append(r)
+                if r:                       # scale this read's vote mass by size
+                    chars, ps = r
+                    reads.append((chars, [p * weight for p in ps]))
         # easyocr reads whatever is written on the plate region - real reg chars
         # (extra recall) AND the dealer/trade branding the plate-only recognisers
         # can't ("TOPGEAR MOTORGROUP", "BM RANGE"), which is how a dealer plate is
@@ -189,7 +190,7 @@ def read_plate_reads(img, engines, cv2, np, enhanced=True):
                 texts.append(word)
                 alnum = re.sub(r"[^A-Z0-9]", "", word)
                 if len(alnum) == 7:
-                    reads.append((alnum, [0.5] * 7))
+                    reads.append((alnum, [0.5 * weight] * 7))
 
     return reads, texts
 
@@ -305,8 +306,13 @@ def _detect_boxes(detector, img):
 
 
 def _detect_plate_crops(detector, cv2, np, img) -> list:
-    """Crop every plate the detector finds - across the full image and, for
-    small/distant plates, an NxN grid of tiles seen closer to native resolution."""
+    """Return (crop, weight) for every plate the detector finds - the full image
+    plus an NxN tile grid for small/distant plates.
+
+    weight favours the FOREGROUND plate (larger, more central), so a background
+    vehicle's plate on a dealer's lot can't out-vote the one being sold: it counts
+    for a fraction of a full-size, central detection.
+    """
     if detector is None:
         return []
     H, W = img.shape[:2]
@@ -325,12 +331,18 @@ def _detect_plate_crops(detector, cv2, np, img) -> list:
                 for (bx1, by1, bx2, by2) in _detect_boxes(detector, tile):
                     boxes.append((bx1 + x0, by1 + y0, bx2 + x0, by2 + y0))
 
+    max_area = max((max(1, (x2 - x1) * (y2 - y1)) for (x1, y1, x2, y2) in boxes),
+                   default=1)
     crops, seen = [], set()
     for (x1, y1, x2, y2) in boxes:
         key = (x1 // 30, y1 // 30, x2 // 30, y2 // 30)  # de-dup overlaps
         if key in seen:
             continue
         seen.add(key)
+        area = max(1, (x2 - x1) * (y2 - y1))
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        off = ((cx - W / 2) / W) ** 2 + ((cy - H / 2) / H) ** 2   # 0 .. ~0.5
+        weight = max(0.08, (area / max_area) ** 0.5 * max(0.5, 1.0 - off))
         padx, pady = int((x2 - x1) * 0.1), int((y2 - y1) * 0.3)
         crop = img[max(0, y1 - pady):y2 + pady, max(0, x1 - padx):x2 + padx]
         if crop.size == 0 or crop.shape[0] < 6 or crop.shape[1] < 6:
@@ -339,7 +351,7 @@ def _detect_plate_crops(detector, cv2, np, img) -> list:
             s = 240.0 / crop.shape[1]
             crop = cv2.resize(crop, None, fx=s, fy=s,
                               interpolation=cv2.INTER_CUBIC)
-        crops.append(crop)
+        crops.append((crop, weight))
     return crops
 
 

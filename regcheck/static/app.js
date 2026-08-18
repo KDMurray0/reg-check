@@ -322,7 +322,9 @@ async function startReview() {
     const r = await fetch('/api/review', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: $('#llmModel').value.trim(),
-                             base_url: $('#llmBaseUrl').value.trim() }),
+                             base_url: $('#llmBaseUrl').value.trim(),
+                             brief: $('#llmBrief').value.trim(),
+                             shortlist: parseInt($('#llmShortlist').value, 10) || 10 }),
     });
     const d = await r.json();
     if (!r.ok) { $('#reviewStatus').textContent = d.error || 'Could not start review'; setReviewRunning(false); return; }

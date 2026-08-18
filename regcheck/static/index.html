@@ -83,6 +83,11 @@ https://www.cazoo.co.uk/vans/nissan/navara/"></textarea>
           style — nothing dropped — and shortlists the best buys with pros &amp; cons.</p>
         <label class="field">Model
           <input id="llmModel" type="text" spellcheck="false" placeholder="qwen3.6:27b" /></label>
+        <label class="field">What matters to you? <span class="muted">(optional — the model weighs price itself by default)</span>
+          <textarea id="llmBrief" rows="2" spellcheck="false"
+            placeholder="e.g. cheapest that drives well, low mileage, near Manchester, no welding"></textarea></label>
+        <label class="field field--inline">Shortlist size
+          <input id="llmShortlist" type="number" min="1" max="25" value="10" /></label>
         <button class="link-btn" id="llmAdvToggle" type="button" aria-expanded="false">Endpoint</button>
         <label class="field" id="llmUrlField" hidden>Base URL
           <input id="llmBaseUrl" type="text" spellcheck="false" placeholder="http://localhost:11434/v1" /></label>

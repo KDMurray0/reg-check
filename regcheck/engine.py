@@ -217,6 +217,7 @@ class Pipeline:
         for line in self.urls:
             if self.stop_event.is_set():
                 break
+            lo, hi = scrape.price_bounds(line)   # the search's own price filter
             if scrape.is_search_url(line):
                 self.log("=" * 50)
                 self.log("[Search] Expanding search results...")
@@ -226,12 +227,14 @@ class Pipeline:
                             page, line, self.log, self.stop_event):
                         tasks.append({"url": r["url"], "distance": r["distance"],
                                       "location": r["location"], "price": r["price"],
-                                      "make": make, "model": model})
+                                      "make": make, "model": model,
+                                      "price_lo": lo, "price_hi": hi})
                 except Exception as exc:
                     self.log(f"[Search] Failed to expand search: {exc!r}")
             else:
                 tasks.append({"url": line, "distance": None, "location": None,
-                              "price": None, "make": "", "model": ""})
+                              "price": None, "make": "", "model": "",
+                              "price_lo": lo, "price_hi": hi})
         return tasks
 
     def _location_display(self, task, d_location, d_distance_miles):
@@ -251,6 +254,16 @@ class Pipeline:
         model = task.get("model") or d_model
         price = task.get("price") or price     # card price wins on Cazoo
         location, distance_miles = self._location_display(task, d_location, d_dist)
+
+        # Sponsored/promoted listings ignore the site's price filter; enforce the
+        # search URL's own price bounds ourselves before spending time reading it.
+        pint = scrape.price_to_int(price)
+        lo, hi = task.get("price_lo"), task.get("price_hi")
+        if pint is not None and ((hi and pint > hi) or (lo and pint < lo)):
+            bound = (f"over £{hi:,}" if hi and pint > hi else f"under £{lo:,}")
+            self.log(f"[FILTER] {price} is {bound} (search filter); skipping "
+                     f"out-of-filter listing.")
+            return
 
         if not image_urls:
             self.log("[SKIPPED] No images found for listing")

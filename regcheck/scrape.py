@@ -48,6 +48,32 @@ def is_search_url(url: str) -> bool:
     return "/car-search" in u
 
 
+def price_bounds(url: str):
+    """(min, max) price from a search URL, so sponsored/promoted listings that
+    ignore the site's own filter can be dropped. Auto Trader uses price-from /
+    price-to query params; Cazoo uses an /under-<N>/ path segment. Either may be
+    None."""
+    lo = hi = None
+    m = re.search(r"[?&]price-from=(\d+)", url)
+    if m:
+        lo = int(m.group(1))
+    m = re.search(r"[?&]price-to=(\d+)", url)
+    if m:
+        hi = int(m.group(1))
+    m = re.search(r"/under-(\d+)", url)      # Cazoo path form
+    if m and hi is None:
+        hi = int(m.group(1))
+    return lo, hi
+
+
+def price_to_int(price_str):
+    """Pull an integer £ amount out of a price string ('£4,850' -> 4850)."""
+    if not price_str:
+        return None
+    m = re.search(r"[\d,]{3,}", str(price_str))
+    return int(m.group(0).replace(",", "")) if m else None
+
+
 def search_make_model(url: str):
     """Extract (make, model) from a search URL - query params or Cazoo slugs."""
     m1 = re.search(r"[?&]make=([^&]+)", url)

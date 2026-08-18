@@ -222,6 +222,11 @@ def post_review():
         base_url = (body.get("base_url") or effective("LLM_BASE_URL")
                     or DEFAULT_BASE_URL).strip()
         model = (body.get("model") or effective("LLM_MODEL") or DEFAULT_MODEL).strip()
+        try:
+            shortlist = max(1, min(25, int(body.get("shortlist", 10))))
+        except (TypeError, ValueError):
+            shortlist = 10
+        brief = (body.get("brief") or "").strip()[:500]
         cfg = load_config()
         cfg["LLM_BASE_URL"], cfg["LLM_MODEL"] = base_url, model
         try:
@@ -232,17 +237,20 @@ def post_review():
         review_state["running"] = True
         review_broker.reset()
         threading.Thread(target=_review_worker,
-                         args=(vehicles, base_url, model), daemon=True).start()
+                         args=(vehicles, base_url, model, shortlist, brief),
+                         daemon=True).start()
     return {"ok": True, "count": len(vehicles), "model": model}
 
 
-def _review_worker(vehicles, base_url, model):
+def _review_worker(vehicles, base_url, model, shortlist=10, brief=""):
     def log(text):
         review_broker.publish({"type": "log", "text": text})
     try:
+        note = f' — priorities: "{brief}"' if brief else ""
         log(f"[Review] Reviewing {len(vehicles)} verified truck(s) with {model} "
-            f"(Swiss-system - every truck is compared, none dropped)...")
-        result = run_tournament(vehicles, base_url, model, log=log)
+            f"(Swiss-system - every truck is compared, none dropped){note}...")
+        result = run_tournament(vehicles, base_url, model, log=log,
+                                shortlist=shortlist, brief=brief)
         review_broker.publish({"type": "shortlist", "model": model, **result})
     except Exception as exc:
         review_broker.publish({"type": "log", "text": f"[Review] Failed: {exc!r}"})

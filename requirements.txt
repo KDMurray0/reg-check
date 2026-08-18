@@ -9,6 +9,13 @@ playwright==1.44.0
 open-image-models==0.5.1
 fast-plate-ocr==1.1.0
 onnxruntime==1.27.0
+# GPU for the ANPR models (optional): install ONE matching build INSTEAD of the
+# plain onnxruntime above and the app auto-uses it — no code change:
+#   AMD / Intel on Windows:  pip install onnxruntime-directml
+#   NVIDIA:                  pip install onnxruntime-gpu
+# The startup log prints the active provider. (The ANPR nets are tiny, so the GPU
+# barely notices them — the heavy GPU workload is the local LLM in the AI review,
+# which your model runner, e.g. Ollama, already runs on the GPU.)
 
 # Image handling — headless OpenCV (no GUI libs) is correct for a server app and
 # ships wheels built for NumPy 2. Do NOT also install plain opencv-python: the two
