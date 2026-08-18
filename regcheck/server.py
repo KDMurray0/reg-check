@@ -165,6 +165,36 @@ def post_run():
     return {"ok": True, "count": len(urls), "verified": mot.configured}
 
 
+@app.post("/api/lookup")
+def post_lookup():
+    """Verify a hand-typed registration (for a manual-review listing) against DVSA
+    and, if real, return it as a result and add it to the AI-review pool."""
+    import requests as _rq
+    from .mot import shape_vehicle
+    body = request.get_json(silent=True) or {}
+    plate = (body.get("plate") or "").strip().upper()
+    if not re.sub(r"[^A-Z0-9]", "", plate):
+        return {"error": "Enter a registration."}, 400
+    mot = MOTClient(effective("MOT_CLIENT_ID"), effective("MOT_CLIENT_SECRET"),
+                    effective("MOT_API_KEY"), effective("MOT_TOKEN_URL"))
+    if not mot.configured:
+        return {"error": "MOT API credentials aren't set."}, 400
+    try:
+        vehicle = mot.lookup(plate, _rq)
+    except Exception as exc:
+        return {"error": f"MOT lookup failed: {exc}"}, 502
+    if not vehicle:
+        return {"error": f"{plate} isn't a DVSA-registered vehicle."}, 404
+    result = {"plate": plate, "verified": True, "corrected": False, "tier": 3,
+              "manual": True, "votes": None, "price": body.get("price") or None,
+              "location": body.get("location") or None, "distanceMiles": None,
+              "url": body.get("url") or None, "site": body.get("site") or "manual",
+              "make": vehicle.get("make", ""), "model": vehicle.get("model", ""),
+              **shape_vehicle(vehicle)}
+    last_results.append(result)
+    return {"ok": True, "result": result}
+
+
 @app.post("/api/stop")
 def post_stop():
     ev = state.get("stop_event")

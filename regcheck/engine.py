@@ -268,6 +268,9 @@ class Pipeline:
         if not image_urls:
             self.log("[SKIPPED] No images found for listing")
             self.review.append((url, location, "no images found"))
+            self.emit({"type": "review", "category": "manual", "url": url,
+                       "location": location, "site": site, "price": price,
+                       "note": "no images found"})
             return
 
         all_reads = []                           # (chars, probs) from every photo
@@ -313,12 +316,13 @@ class Pipeline:
                          f"{dealer_hits} image(s)")
                 self.dealer.append((url, location))
                 self.emit({"type": "review", "category": "dealer", "url": url,
-                           "location": location, "site": site, "note": None})
+                           "location": location, "site": site, "price": price,
+                           "note": None})
             else:
                 self.log("[FAILED] No registration plate could be read")
                 self.review.append((url, location, "no plate could be read"))
                 self.emit({"type": "review", "category": "manual", "url": url,
-                           "location": location, "site": site,
+                           "location": location, "site": site, "price": price,
                            "note": "no plate could be read"})
             return
 
@@ -367,13 +371,14 @@ class Pipeline:
                          f"({dealer_hits} image(s)); no real registration shown")
                 self.dealer.append((url, location))
                 self.emit({"type": "review", "category": "dealer", "url": url,
-                           "location": location, "site": site, "note": None})
+                           "location": location, "site": site, "price": price,
+                           "note": None})
                 return
             shortlist = ", ".join(f"{p}({v})" for p, v in ordered[:8])
             self.log(f"[FAILED] Read plate(s) but none verified: {shortlist}")
             self.review.append((url, location, f"read but unverified: {shortlist}"))
             self.emit({"type": "review", "category": "manual", "url": url,
-                       "location": location, "site": site,
+                       "location": location, "site": site, "price": price,
                        "note": f"read but unverified: {shortlist}"})
             return
 

@@ -77,10 +77,10 @@ https://www.cazoo.co.uk/vans/nissan/navara/"></textarea>
       <section class="panel" id="reviewPanel">
         <div class="panel__head">
           <h2 class="eyebrow">AI shortlist</h2>
-          <span class="conn" id="reviewCountPill" data-ok="false">0 trucks</span>
+          <span class="conn" id="reviewCountPill" data-ok="false">0 vehicles</span>
         </div>
-        <p class="hint">A local model reviews every verified truck Swiss-tournament
-          style — nothing dropped — and shortlists the best buys with pros &amp; cons.</p>
+        <p class="hint">A local model reviews every verified vehicle Swiss-tournament
+          style (Elo rated, nothing dropped) and shortlists the best buys with pros &amp; cons.</p>
         <label class="field">Model
           <input id="llmModel" type="text" spellcheck="false" placeholder="qwen3.6:27b" /></label>
         <label class="field">What matters to you? <span class="muted">(optional — the model weighs price itself by default)</span>
@@ -88,10 +88,12 @@ https://www.cazoo.co.uk/vans/nissan/navara/"></textarea>
             placeholder="e.g. cheapest that drives well, low mileage, near Manchester, no welding"></textarea></label>
         <label class="field field--inline">Shortlist size
           <input id="llmShortlist" type="number" min="1" max="25" value="10" /></label>
+        <label class="check"><input id="llmWait" type="checkbox" />
+          <span>Wait for manual review <span class="muted">(don't auto-run — let me fix plates first)</span></span></label>
         <button class="link-btn" id="llmAdvToggle" type="button" aria-expanded="false">Endpoint</button>
         <label class="field" id="llmUrlField" hidden>Base URL
           <input id="llmBaseUrl" type="text" spellcheck="false" placeholder="http://localhost:11434/v1" /></label>
-        <button class="btn btn--review" id="reviewBtn" type="button" disabled>Shortlist trucks</button>
+        <button class="btn btn--review" id="reviewBtn" type="button" disabled>Shortlist vehicles</button>
         <p class="hint" id="reviewStatus"></p>
       </section>
     </aside>
@@ -114,7 +116,7 @@ https://www.cazoo.co.uk/vans/nissan/navara/"></textarea>
         </div>
         <div class="shortlist__cards" id="shortlistCards"></div>
         <details class="leaderboard" id="leaderboard" hidden>
-          <summary><span class="feed__tick"></span>Full leaderboard — every truck ranked, none dropped <b id="leaderCount">0</b></summary>
+          <summary><span class="feed__tick"></span>Full leaderboard — every vehicle Elo-ranked, none dropped <b id="leaderCount">0</b></summary>
           <div class="leaderboard__wrap"><table class="leaderboard__table" id="leaderTable"></table></div>
         </details>
       </section>

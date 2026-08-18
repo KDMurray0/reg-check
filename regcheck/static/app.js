@@ -175,6 +175,10 @@ function onDone(s) {
     $('#empty').hidden = false;
   }
   updateReviewAvailability(tallies.verified);
+  // Auto-run the AI review unless the user wants to fix manual-review plates first.
+  if (!(s && s.stopped) && tallies.verified > 0 && !$('#llmWait').checked) {
+    setTimeout(startReview, 500);
+  }
 }
 
 function setProgress(cur, total) {
@@ -280,11 +284,55 @@ function renderReview(ev) {
     isDealer ? tallies.dealer : tallies.review;
   const item = document.createElement('div');
   item.className = 'shelf__item';
-  item.innerHTML =
-    `<a href="${esc(ev.url)}" target="_blank" rel="noopener noreferrer">${esc(ev.url)}</a>` +
+  const meta =
     (ev.location && ev.location !== 'N/A' ? `<span class="note">${esc(ev.location)}</span>` : '') +
+    (ev.price ? `<span class="note">${esc(ev.price)}</span>` : '') +
     (ev.note ? `<span class="note">${esc(ev.note)}</span>` : '');
+  item.innerHTML =
+    `<div class="shelf__row">
+       <a href="${esc(ev.url)}" target="_blank" rel="noopener noreferrer">${esc(ev.url)}</a>` +
+    (isDealer ? '' : `<button class="pen" type="button" title="Read the reg yourself and enter it" aria-label="Enter reg">✎</button>`) +
+    `</div>${meta}` +
+    (isDealer ? '' :
+      `<form class="reg-edit" hidden>
+         <input class="reg-input" placeholder="type the reg, e.g. AB12 CDE" spellcheck="false" maxlength="10" />
+         <button class="btn btn--ghost" type="submit">Check</button>
+         <span class="reg-msg"></span>
+       </form>`);
+  if (!isDealer) wireManualEdit(item, ev);
   $(isDealer ? '#dealerList' : '#reviewList').appendChild(item);
+}
+
+function wireManualEdit(item, ev) {
+  const pen = item.querySelector('.pen');
+  const form = item.querySelector('.reg-edit');
+  const input = item.querySelector('.reg-input');
+  const msg = item.querySelector('.reg-msg');
+  pen.addEventListener('click', () => {
+    form.hidden = !form.hidden;
+    if (!form.hidden) input.focus();
+  });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const plate = input.value.trim();
+    if (!plate) return;
+    msg.textContent = 'Checking…';
+    try {
+      const r = await fetch('/api/lookup', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plate, url: ev.url, location: ev.location,
+                               price: ev.price, site: ev.site }),
+      });
+      const d = await r.json();
+      if (!r.ok) { msg.textContent = d.error || 'Not found'; return; }
+      renderResult(d.result);
+      tallies.verified++; tallies.review = Math.max(0, tallies.review - 1);
+      updateTallies(); updateReviewAvailability(tallies.verified);
+      $('#reviewCount').textContent = tallies.review;
+      item.remove();
+      if (!$('#reviewList').children.length) $('#reviewShelf').hidden = true;
+    } catch { msg.textContent = 'Server error'; }
+  });
 }
 
 /* ---- AI review (local LLM tournament) ---------------------------------- */
@@ -302,7 +350,7 @@ async function loadLlmConfig() {
 
 function updateReviewAvailability(n) {
   const pill = $('#reviewCountPill');
-  pill.textContent = `${n} truck${n === 1 ? '' : 's'}`;
+  pill.textContent = `${n} vehicle${n === 1 ? '' : 's'}`;
   pill.dataset.ok = n > 0 ? 'true' : 'false';
   $('#reviewBtn').disabled = n < 1;
 }
@@ -313,11 +361,16 @@ $('#llmAdvToggle').addEventListener('click', (e) => {
   e.target.setAttribute('aria-expanded', String(!f.hidden));
 });
 
+const waitEl = $('#llmWait');
+waitEl.checked = localStorage.getItem('regcheck-wait') === '1';
+waitEl.addEventListener('change', () =>
+  localStorage.setItem('regcheck-wait', waitEl.checked ? '1' : '0'));
+
 $('#reviewBtn').addEventListener('click', startReview);
 
 async function startReview() {
   setReviewRunning(true);
-  $('#reviewStatus').textContent = 'Reviewing every verified truck…';
+  $('#reviewStatus').textContent = 'Reviewing every verified vehicle…';
   try {
     const r = await fetch('/api/review', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -334,7 +387,7 @@ async function startReview() {
 
 function setReviewRunning(on) {
   $('#reviewBtn').disabled = on;
-  $('#reviewBtn').textContent = on ? 'Reviewing…' : 'Shortlist trucks';
+  $('#reviewBtn').textContent = on ? 'Reviewing…' : 'Shortlist vehicles';
 }
 
 function attachReviewStream() {
@@ -391,10 +444,10 @@ function renderLeaderboard(rows) {
     <td class="lb-num">${esc(r.mileage || '')}</td>
     <td>${esc(r.location || '')}</td>
     <td class="lb-note">${esc(r.note || '')}</td>
-    <td class="lb-num">${esc(String(r.points))}</td></tr>`).join('');
+    <td class="lb-num">${esc(String(r.rating))}</td></tr>`).join('');
   $('#leaderTable').innerHTML =
     `<thead><tr><th>#</th><th>Reg</th><th>Price</th><th>Year</th><th>Mileage</th>` +
-    `<th>Where</th><th>MOT notes</th><th>Pts</th></tr></thead><tbody>${body}</tbody>`;
+    `<th>Where</th><th>MOT notes</th><th>Elo</th></tr></thead><tbody>${body}</tbody>`;
   $('#leaderboard').hidden = false;
 }
 
