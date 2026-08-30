@@ -12,6 +12,7 @@ import json
 import os
 import queue
 import re
+import sys
 import threading
 
 from flask import Flask, Response, request, send_from_directory, stream_with_context
@@ -20,7 +21,12 @@ from .engine import Pipeline
 from .mot import MOTClient
 from .review import DEFAULT_BASE_URL, DEFAULT_MODEL, run_tournament
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Config + results live next to the executable (a PyInstaller build) or at the
+# project root (running from source), so they are easy to find and writable.
+if getattr(sys, "frozen", False):
+    ROOT = os.path.dirname(sys.executable)
+else:
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(ROOT, "reg_check_config.json")
 OUTPUT_FILE = os.path.join(ROOT, "extraction_results.txt")
 CRED_FIELDS = ("MOT_CLIENT_ID", "MOT_CLIENT_SECRET", "MOT_API_KEY", "MOT_TOKEN_URL")

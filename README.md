@@ -39,6 +39,22 @@ trucks and shortlist the best buys (see **AI shortlist** below).
    The inspection bay opens at <http://127.0.0.1:5000/>. Close the console window
    (or Ctrl+C) to stop. Override the port with `REGCHECK_PORT` if 5000 is taken.
 
+## Standalone build (optional)
+
+To produce a self-contained folder you can run without a Python install:
+
+```powershell
+pip install pyinstaller
+pyinstaller reg-check.spec --noconfirm
+```
+
+The result is `dist/reg-check/reg-check.exe`. It still needs the Playwright
+browser (`playwright install chromium`) and downloads the small ANPR weights on
+first run. The frozen build is **ANPR-only** — torch/easyocr are excluded to keep
+it lean, so it drops the easyocr recall backup and the easyocr-based dealer-plate
+text read (dealer plates then fall to *Manual review*). Run from source if you
+want those.
+
 ## Using it
 
 Paste one or more **Auto Trader** or **Cazoo** links into the console, one per line.

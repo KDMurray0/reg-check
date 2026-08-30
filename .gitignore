@@ -8,6 +8,10 @@ extraction_results.txt
 cache/
 _*.py
 
+# PyInstaller build outputs (the .spec is tracked; build/ and dist/ are not)
+build/
+dist/
+
 # python
 __pycache__/
 *.py[cod]

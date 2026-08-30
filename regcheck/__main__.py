@@ -8,8 +8,17 @@ Host/port can be overridden with REGCHECK_HOST / REGCHECK_PORT.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import webbrowser
+
+# A frozen build ships without the Playwright browser; point it at the standard
+# per-user ms-playwright cache (populated by `playwright install chromium`) so it
+# is found instead of being looked for inside the bundle.
+if getattr(sys, "frozen", False) and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+    _local = os.environ.get("LOCALAPPDATA") or os.path.join(
+        os.path.expanduser("~"), "AppData", "Local")
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(_local, "ms-playwright")
 
 from .server import app
 
