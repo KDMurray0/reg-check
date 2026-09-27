@@ -19,7 +19,7 @@ from flask import Flask, Response, request, send_from_directory, stream_with_con
 
 from .engine import Pipeline
 from .mot import MOTClient
-from .review import DEFAULT_BASE_URL, DEFAULT_MODEL, run_tournament
+from .review import PROVIDERS, is_local, list_models, run_tournament
 
 # Config + results live next to the executable (a PyInstaller build) or at the
 # project root (running from source), so they are easy to find and writable.
@@ -191,8 +191,16 @@ def post_lookup():
         return {"error": f"MOT lookup failed: {exc}"}, 502
     if not vehicle:
         return {"error": f"{plate} isn't a DVSA-registered vehicle."}, 404
+    from .mot import vehicle_tier
+    l_make, l_model = body.get("make") or "", body.get("model") or ""
+    warning = None
+    if (l_make or l_model) and vehicle_tier(l_make, l_model, vehicle) < 2:
+        warning = (f"DVSA says {plate} is a {vehicle.get('make', '')} "
+                   f"{vehicle.get('model', '')}, but the listing is a {l_make} "
+                   f"{l_model} - double-check the reg.")
     result = {"plate": plate, "verified": True, "corrected": False, "tier": 3,
-              "manual": True, "votes": None, "price": body.get("price") or None,
+              "manual": True, "votes": None, "warning": warning,
+              "price": body.get("price") or None,
               "location": body.get("location") or None, "distanceMiles": None,
               "url": body.get("url") or None, "site": body.get("site") or "manual",
               "make": vehicle.get("make", ""), "model": vehicle.get("model", ""),
@@ -240,11 +248,74 @@ def _worker(pipeline: Pipeline):
 
 # --- AI review (local LLM tournament) ---------------------------------------
 
+def _llm_settings(provider=None, body=None):
+    """(provider, base_url, api_key, model) for a review: request body first, then
+    saved settings, then defaults. Each provider remembers its own model."""
+    body = body or {}
+    cfg = load_config()
+    provider = provider or body.get("provider") or cfg.get("LLM_PROVIDER") or "local"
+    if provider not in PROVIDERS:
+        provider = "local"
+    spec = PROVIDERS[provider]
+    if provider == "local":
+        base_url = (body.get("base_url") or cfg.get("LLM_BASE_URL")
+                    or spec["base_url"]).strip()
+    else:
+        base_url = spec["base_url"]
+    api_key = effective(spec["key"]) if spec["key"] else None
+    model = (body.get("model") or cfg.get(f"LLM_MODEL_{provider}")
+             or (cfg.get("LLM_MODEL") if provider == "local" else None)
+             or spec["default_model"]).strip()
+    return provider, base_url, api_key, model
+
+
+def _llm_state(provider=None):
+    """What the page needs to show for a provider - never the API key itself."""
+    provider, base_url, api_key, model = _llm_settings(provider)
+    spec = PROVIDERS[provider]
+    installed, reach_error = [], None
+    if spec["key"] and not api_key:
+        reach_error = f"Add your {spec['label']} API key to use it."
+    else:
+        try:
+            installed = list_models(base_url, api_key)
+        except Exception as exc:
+            reach_error = f"Can't reach {spec['label']} ({exc})"
+    suggested = (spec["default_model"] if spec["default_model"] in installed
+                 else (installed[0] if installed else None))
+    return {"provider": provider,
+            "providers": [{"id": k, "label": v["label"], "needs_key": bool(v["key"])}
+                          for k, v in PROVIDERS.items()],
+            "base_url": base_url, "model": model, "installed": installed,
+            "model_ok": model in installed, "suggested": suggested,
+            "key_set": bool(api_key) if spec["key"] else None,
+            "cloud": not is_local(base_url), "reach_error": reach_error,
+            "results": len(last_results), "running": review_state["running"]}
+
+
 @app.get("/api/llm-config")
 def get_llm_config():
-    return {"base_url": effective("LLM_BASE_URL") or DEFAULT_BASE_URL,
-            "model": effective("LLM_MODEL") or DEFAULT_MODEL,
-            "results": len(last_results), "running": review_state["running"]}
+    """Review settings for a provider plus the models it actually offers, so the
+    page can list them and warn if the saved model has gone."""
+    return _llm_state(request.args.get("provider"))
+
+
+@app.post("/api/llm-config")
+def post_llm_config():
+    """Save the chosen provider and, if given, a provider API key (write-only)."""
+    body = request.get_json(silent=True) or {}
+    cfg = load_config()
+    provider = body.get("provider") if body.get("provider") in PROVIDERS else None
+    if provider:
+        cfg["LLM_PROVIDER"] = provider
+    for spec in PROVIDERS.values():
+        if spec["key"] and (body.get(spec["key"]) or "").strip():
+            cfg[spec["key"]] = body[spec["key"]].strip()
+    try:
+        save_config(cfg)
+    except Exception as exc:
+        return {"error": f"could not save settings: {exc}"}, 500
+    return _llm_state(provider)
 
 
 @app.post("/api/review")
@@ -253,18 +324,21 @@ def post_review():
         if review_state["running"]:
             return {"error": "A review is already running."}, 409
         if not last_results:
-            return {"error": "Run an inspection first - no verified trucks yet."}, 400
+            return {"error": "Run an inspection first - no verified vehicles yet."}, 400
         body = request.get_json(silent=True) or {}
-        base_url = (body.get("base_url") or effective("LLM_BASE_URL")
-                    or DEFAULT_BASE_URL).strip()
-        model = (body.get("model") or effective("LLM_MODEL") or DEFAULT_MODEL).strip()
+        provider, base_url, api_key, model = _llm_settings(body=body)
+        spec = PROVIDERS[provider]
+        if spec["key"] and not api_key:
+            return {"error": f"Add your {spec['label']} API key first."}, 400
         try:
             shortlist = max(1, min(25, int(body.get("shortlist", 10))))
         except (TypeError, ValueError):
             shortlist = 10
         brief = (body.get("brief") or "").strip()[:500]
         cfg = load_config()
-        cfg["LLM_BASE_URL"], cfg["LLM_MODEL"] = base_url, model
+        cfg["LLM_PROVIDER"], cfg[f"LLM_MODEL_{provider}"] = provider, model
+        if provider == "local":
+            cfg["LLM_BASE_URL"] = base_url
         try:
             save_config(cfg)
         except Exception:
@@ -273,23 +347,29 @@ def post_review():
         review_state["running"] = True
         review_broker.reset()
         threading.Thread(target=_review_worker,
-                         args=(vehicles, base_url, model, shortlist, brief),
+                         args=(vehicles, base_url, model, shortlist, brief, api_key,
+                               spec["label"]),
                          daemon=True).start()
-    return {"ok": True, "count": len(vehicles), "model": model}
+    return {"ok": True, "count": len(vehicles), "model": model, "provider": provider}
 
 
-def _review_worker(vehicles, base_url, model, shortlist=10, brief=""):
+def _review_worker(vehicles, base_url, model, shortlist=10, brief="", api_key=None,
+                   label=""):
     def log(text):
         review_broker.publish({"type": "log", "text": text})
     try:
-        note = f' — priorities: "{brief}"' if brief else ""
-        log(f"[Review] Reviewing {len(vehicles)} verified truck(s) with {model} "
-            f"(Swiss-system - every truck is compared, none dropped){note}...")
-        result = run_tournament(vehicles, base_url, model, log=log,
+        note = f' - priorities: "{brief}"' if brief else ""
+        cloud = ("" if is_local(base_url)
+                 else " (cloud: vehicle details are sent to this service)")
+        log(f"[Review] Reviewing {len(vehicles)} verified vehicle(s) with {model} "
+            f"on {label}{cloud} - Swiss-system, every vehicle compared, none "
+            f"dropped{note}...")
+        result = run_tournament(vehicles, base_url, model, log=log, api_key=api_key,
                                 shortlist=shortlist, brief=brief)
-        review_broker.publish({"type": "shortlist", "model": model, **result})
+        review_broker.publish({"type": "shortlist", "model": model, "provider": label,
+                               **result})
     except Exception as exc:
-        review_broker.publish({"type": "log", "text": f"[Review] Failed: {exc!r}"})
+        review_broker.publish({"type": "log", "text": f"[Review] Failed: {exc}"})
         review_broker.publish({"type": "shortlist", "shortlist": [],
                                "leaderboard": [], "error": str(exc)})
     finally:

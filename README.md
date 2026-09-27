@@ -11,7 +11,7 @@ price, distance/location and full MOT history. Results are also written to
 It runs entirely on your machine: a thin Flask server drives Playwright + a
 dedicated ANPR plate-reading pipeline, and a single designed page shows progress
 live over Server-Sent Events. An optional local LLM can then review the verified
-trucks and shortlist the best buys (see **AI shortlist** below).
+vehicles and shortlist the best buys (see **AI shortlist** below).
 
 ## Setup (Windows)
 
@@ -85,24 +85,44 @@ or where no plate could be verified, drop into the **Dealer / trade plates** and
 
 ## AI shortlist — local LLM review (optional)
 
-Once a run has verified some trucks, **AI shortlist** has a local model review them
+Once a run has verified some vehicles, **AI shortlist** has a local model review them
 and rank the best buys, weighing year, mileage, price, distance and the full MOT
 history (failures, dangerous defects, recurring advisories, mileage consistency).
+By default it runs automatically when an inspection finishes; tick **Wait for
+manual review** to hold it until you've fixed any unread plates with the pen icon.
 
-It's a **Swiss-system tournament**, not a knockout: every truck is compared against
-its peers over several rounds and earns points by placement, with the group
-boundaries shifting each round so a borderline truck meets the rivals it just
-missed. Nothing is ever eliminated — you get a **full leaderboard of every truck**
-plus written-up **pros & cons for the top ~10**, with a *best buy* highlighted. If
-the model returns something unparseable for a group, that group keeps its current
-order, so a flaky reply never drops a truck.
+It's a **Swiss-system tournament**, not a knockout: every vehicle is compared against
+similar-rated peers over several rounds and earns an **Elo** rating from the
+head-to-head results, with group boundaries shifting each round so a borderline
+vehicle meets the rivals it just missed. Nothing is eliminated — you get a **full
+leaderboard of every vehicle** plus written **pros & cons for the top ~10**, with a
+*best buy* highlighted. The same vehicle listed twice is merged (cheapest kept).
 
-Point it at any **OpenAI-compatible** endpoint — [Ollama](https://ollama.com)
-(default `http://localhost:11434/v1`), LM Studio, llama.cpp or vLLM — and set the
-**model** name in the panel. Good local choices on a 24 GB GPU: `qwen2.5:32b` or
-`qwen3.6:27b` for the sharpest judgement, `gemma3:12b` for speed with a big context.
-The tournament batches the trucks, so context size is never the limit and accuracy,
-not speed, is what matters. No API keys or cloud calls — it stays on your machine.
+It **fails loudly rather than faking it**: the model is checked against what the
+server actually has installed, a reply that isn't a complete ranking is discarded
+(never scored), and if the model produces no usable rankings the review stops with
+the reason. The shortlist header shows how many comparisons and verdicts were
+genuinely AI-made, and any card without an AI verdict says so. When the review
+finishes the model is **unloaded from GPU memory** straight away.
+
+**Where the AI runs** — pick in the panel:
+
+- **Local (Ollama)** — default `http://localhost:11434/v1` (any OpenAI-compatible
+  server works: LM Studio, llama.cpp, vLLM). Nothing leaves your PC. Choose a
+  **non-"thinking"** instruct model: `qwen2.5:32b` ranks well here. Reasoning
+  models such as Qwen3.5 tend to spend their whole token budget thinking and
+  never answer, and with reasoning switched off they ranked poorly in testing.
+  The model is unloaded from GPU memory as soon as the review finishes.
+- **Groq (cloud)** — fast hosted models; `openai/gpt-oss-120b` is the default and
+  ranked correctly in testing in under a second per comparison. Paste your Groq
+  API key into the panel once — it's saved in `reg_check_config.json` on this PC
+  (git-ignored, never sent back to the page). **Vehicle details and MOT history
+  are sent to Groq** to be judged. Free-tier rate limits are handled by waiting
+  and retrying, so a big review just takes a little longer.
+
+Only models the server actually offers are listed, and each review starts with a
+one-call check, so a removed, blocked or broken model fails straight away with
+the reason rather than mid-review.
 
 ## DVSA MOT History API — free, official
 

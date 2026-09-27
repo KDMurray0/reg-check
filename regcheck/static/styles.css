@@ -438,6 +438,10 @@ b { font-weight: 700; }
 .sl-price { margin-left: auto; font-family: var(--font-mono); font-weight: 700; font-size: 20px; }
 .sl-meta { font-family: var(--font-mono); font-size: 12px; color: var(--muted); margin: 8px 0 0; }
 .sl-verdict { margin: 10px 0 0; font-size: 14px; line-height: 1.5; }
+.sl-verdict--auto { font-size: 12.5px; color: var(--advisory); font-style: italic; }
+.sl-meta a { color: var(--gb-blue); }
+:root:not([data-theme="light"]) .sl-meta a { color: #7FA6FF; }
+#reviewStatus.is-error { color: var(--fail); }
 .sl-pc { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 18px; margin-top: 10px; }
 .sl-pros, .sl-cons { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; align-content: start; }
 .sl-pros li, .sl-cons li { font-size: 12.5px; line-height: 1.4; padding-left: 16px; position: relative; color: var(--muted); }
@@ -499,3 +503,12 @@ b { font-weight: 700; }
 @media (prefers-reduced-motion: reduce) {
   *, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---- AI provider switch (local / Groq cloud) ---------------------------- */
+.segmented--two { grid-template-columns: repeat(2, 1fr); margin-top: 10px; }
+.key-row { display: flex; gap: 6px; }
+.key-row input { flex: 1 1 auto; min-width: 0; background: var(--ink-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 8px 10px;
+  font-family: var(--font-mono); font-size: 12.5px; }
+.key-row .btn { flex: 0 0 auto; }
+.cloud-note { color: var(--advisory); margin-bottom: 0; }

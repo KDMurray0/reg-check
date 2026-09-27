@@ -79,10 +79,23 @@ https://www.cazoo.co.uk/vans/nissan/navara/"></textarea>
           <h2 class="eyebrow">AI shortlist</h2>
           <span class="conn" id="reviewCountPill" data-ok="false">0 vehicles</span>
         </div>
-        <p class="hint">A local model reviews every verified vehicle Swiss-tournament
+        <p class="hint">An AI model reviews every verified vehicle Swiss-tournament
           style (Elo rated, nothing dropped) and shortlists the best buys with pros &amp; cons.</p>
+        <div class="segmented segmented--two" id="llmProvider" role="radiogroup" aria-label="Where the AI runs">
+          <button role="radio" data-provider="local" aria-checked="true">Local (Ollama)</button>
+          <button role="radio" data-provider="groq" aria-checked="false">Groq (cloud)</button>
+        </div>
+        <div id="groqKeyRow" hidden>
+          <p class="hint cloud-note">Cloud: vehicle details and MOT history are sent to Groq to be judged.</p>
+          <label class="field">Groq API key <span class="muted" id="groqKeyState"></span>
+            <span class="key-row">
+              <input id="groqKey" type="password" autocomplete="off" placeholder="gsk_… (saved on this PC only)" />
+              <button class="btn btn--ghost" id="saveGroqKey" type="button">Save</button>
+            </span></label>
+        </div>
         <label class="field">Model
-          <input id="llmModel" type="text" spellcheck="false" placeholder="qwen3.6:27b" /></label>
+          <input id="llmModel" type="text" spellcheck="false" list="llmModels" placeholder="qwen2.5:32b" />
+          <datalist id="llmModels"></datalist></label>
         <label class="field">What matters to you? <span class="muted">(optional — the model weighs price itself by default)</span>
           <textarea id="llmBrief" rows="2" spellcheck="false"
             placeholder="e.g. cheapest that drives well, low mileage, near Manchester, no welding"></textarea></label>
@@ -90,7 +103,7 @@ https://www.cazoo.co.uk/vans/nissan/navara/"></textarea>
           <input id="llmShortlist" type="number" min="1" max="25" value="10" /></label>
         <label class="check"><input id="llmWait" type="checkbox" />
           <span>Wait for manual review <span class="muted">(don't auto-run — let me fix plates first)</span></span></label>
-        <button class="link-btn" id="llmAdvToggle" type="button" aria-expanded="false">Endpoint</button>
+        <button class="link-btn" id="llmAdvToggle" type="button" aria-expanded="false">Local endpoint</button>
         <label class="field" id="llmUrlField" hidden>Base URL
           <input id="llmBaseUrl" type="text" spellcheck="false" placeholder="http://localhost:11434/v1" /></label>
         <button class="btn btn--review" id="reviewBtn" type="button" disabled>Shortlist vehicles</button>

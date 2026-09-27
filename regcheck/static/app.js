@@ -321,7 +321,8 @@ function wireManualEdit(item, ev) {
       const r = await fetch('/api/lookup', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plate, url: ev.url, location: ev.location,
-                               price: ev.price, site: ev.site }),
+                               price: ev.price, site: ev.site,
+                               make: ev.make, model: ev.model }),
       });
       const d = await r.json();
       if (!r.ok) { msg.textContent = d.error || 'Not found'; return; }
@@ -335,18 +336,63 @@ function wireManualEdit(item, ev) {
   });
 }
 
-/* ---- AI review (local LLM tournament) ---------------------------------- */
+/* ---- AI review (LLM tournament: local Ollama or Groq cloud) ------------ */
 let reviewEs = null;
+let reviewFailed = false;
+
+let llmProvider = 'local';
+
+// Show a provider's settings: its models, whether its key is saved (never the key).
+function applyLlmState(d) {
+  llmProvider = d.provider || 'local';
+  document.querySelectorAll('#llmProvider button').forEach((b) =>
+    b.setAttribute('aria-checked', String(b.dataset.provider === llmProvider)));
+  const needsKey = (d.providers || []).some((p) => p.id === llmProvider && p.needs_key);
+  $('#groqKeyRow').hidden = !needsKey;
+  $('#groqKeyState').textContent = needsKey ? (d.key_set ? '— saved ✓' : '— not set') : '';
+  $('#llmAdvToggle').hidden = llmProvider !== 'local';
+  if (llmProvider !== 'local') $('#llmUrlField').hidden = true;
+  $('#llmModels').innerHTML = (d.installed || [])
+    .map((m) => `<option value="${esc(m)}"></option>`).join('');
+  setReviewStatus('');
+  if (d.model_ok || !d.suggested) $('#llmModel').value = d.model || '';
+  else {
+    // The saved model isn't offered any more: say so and switch to one that is.
+    $('#llmModel').value = d.suggested;
+    setReviewStatus(`Saved model "${d.model}" isn't available — switched to ${d.suggested}.`);
+  }
+  if (d.reach_error) {
+    setReviewStatus(d.reach_error + (llmProvider === 'local' ? ' — is Ollama running?' : ''), true);
+  }
+  if (llmProvider === 'local' && !$('#llmBaseUrl').value) $('#llmBaseUrl').value = d.base_url || '';
+}
 
 async function loadLlmConfig() {
   try {
     const d = await (await fetch('/api/llm-config')).json();
-    if (!$('#llmModel').value) $('#llmModel').value = d.model || '';
-    if (!$('#llmBaseUrl').value) $('#llmBaseUrl').value = d.base_url || '';
+    applyLlmState(d);
     updateReviewAvailability(d.results || 0);
     if (d.running) { setReviewRunning(true); attachReviewStream(); }
   } catch { /* server not up yet */ }
 }
+
+async function saveLlmSettings(body) {
+  const r = await fetch('/api/llm-config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  applyLlmState(await r.json());
+}
+
+document.querySelectorAll('#llmProvider button').forEach((b) =>
+  b.addEventListener('click', () => saveLlmSettings({ provider: b.dataset.provider })));
+
+$('#saveGroqKey').addEventListener('click', async () => {
+  const key = $('#groqKey').value.trim();
+  if (!key) return;
+  $('#groqKey').value = '';
+  await saveLlmSettings({ provider: 'groq', GROQ_API_KEY: key });
+});
 
 function updateReviewAvailability(n) {
   const pill = $('#reviewCountPill');
@@ -370,19 +416,21 @@ $('#reviewBtn').addEventListener('click', startReview);
 
 async function startReview() {
   setReviewRunning(true);
-  $('#reviewStatus').textContent = 'Reviewing every verified vehicle…';
+  reviewFailed = false;
+  setReviewStatus('Reviewing every verified vehicle…');
   try {
     const r = await fetch('/api/review', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: $('#llmModel').value.trim(),
-                             base_url: $('#llmBaseUrl').value.trim(),
+      body: JSON.stringify({ provider: llmProvider,
+                             model: $('#llmModel').value.trim(),
+                             base_url: llmProvider === 'local' ? $('#llmBaseUrl').value.trim() : '',
                              brief: $('#llmBrief').value.trim(),
                              shortlist: parseInt($('#llmShortlist').value, 10) || 10 }),
     });
     const d = await r.json();
-    if (!r.ok) { $('#reviewStatus').textContent = d.error || 'Could not start review'; setReviewRunning(false); return; }
+    if (!r.ok) { setReviewStatus(d.error || 'Could not start review', true); setReviewRunning(false); return; }
     attachReviewStream();
-  } catch { $('#reviewStatus').textContent = 'Server not reachable'; setReviewRunning(false); }
+  } catch { setReviewStatus('Server not reachable', true); setReviewRunning(false); }
 }
 
 function setReviewRunning(on) {
@@ -395,19 +443,36 @@ function attachReviewStream() {
   reviewEs = new EventSource('/api/review/stream');
   reviewEs.onmessage = (m) => {
     let ev; try { ev = JSON.parse(m.data); } catch { return; }
-    if (ev.type === 'log') { appendLog(ev.text); $('#reviewStatus').textContent = ev.text.replace(/^\[Review\]\s*/, ''); }
+    if (ev.type === 'log') { appendLog(ev.text); setReviewStatus(ev.text.replace(/^\[Review\]\s*/, '')); }
     else if (ev.type === 'shortlist') renderShortlist(ev);
-    else if (ev.type === 'done') { setReviewRunning(false); $('#reviewStatus').textContent = 'Shortlist ready.'; if (reviewEs) { reviewEs.close(); reviewEs = null; } }
+    else if (ev.type === 'done') {
+      setReviewRunning(false);
+      if (!reviewFailed) setReviewStatus('Shortlist ready.');
+      if (reviewEs) { reviewEs.close(); reviewEs = null; }
+    }
   };
   reviewEs.onerror = () => {};
 }
 
+function setReviewStatus(text, isError) {
+  const el = $('#reviewStatus');
+  el.textContent = text;
+  el.classList.toggle('is-error', !!isError);
+}
+
 function renderShortlist(ev) {
-  if (ev.error) { $('#reviewStatus').textContent = 'Review error: ' + ev.error; return; }
+  if (ev.error) {
+    reviewFailed = true;
+    setReviewStatus('Review stopped: ' + ev.error, true);
+    return;
+  }
   const cards = $('#shortlistCards');
   cards.innerHTML = '';
   (ev.shortlist || []).forEach((r) => cards.appendChild(shortlistCard(r)));
-  $('#shortlistModel').textContent = ev.model ? `· ${ev.model}` : '';
+  const s = ev.stats || {};
+  $('#shortlistModel').textContent = ev.model
+    ? `· ${ev.model} · ${s.ok || 0} AI comparisons · ${s.verdicts_ai || 0}/${s.verdicts || 0} AI verdicts`
+    : '';
   renderLeaderboard(ev.leaderboard || []);
   $('#shortlistSection').hidden = false;
   $('#shortlistSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -416,7 +481,13 @@ function renderShortlist(ev) {
 function shortlistCard(r) {
   const el = document.createElement('div');
   el.className = 'sl-card' + (r.best ? ' sl-card--best' : '');
-  const meta = [r.year, r.mileage, r.location].filter(Boolean).map(esc).join(' · ');
+  const meta = [[r.make, r.model].filter(Boolean).join(' '), r.year, r.mileage, r.location]
+    .filter(Boolean).map(esc).join(' · ');
+  const verdict = r.ai
+    ? `<p class="sl-verdict">${esc(r.verdict)}</p>`
+    : `<p class="sl-verdict sl-verdict--auto">No AI verdict for this one — plain MOT facts below.</p>`;
+  const also = (r.also || []).filter(Boolean).map((u, k) =>
+    `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">listing ${k + 2}</a>`).join(', ');
   el.innerHTML = `
     <div class="sl-card__head">
       <span class="sl-rank">${r.best ? 'BEST BUY' : '#' + r.rank}</span>
@@ -425,7 +496,8 @@ function shortlistCard(r) {
       <span class="sl-price">${esc(r.price || 'N/A')}</span>
     </div>
     <div class="sl-meta">${meta}</div>
-    ${r.verdict ? `<p class="sl-verdict">${esc(r.verdict)}</p>` : ''}
+    ${also ? `<div class="sl-meta">Also listed: ${also}</div>` : ''}
+    ${verdict}
     <div class="sl-pc">
       <ul class="sl-pros">${(r.pros || []).map((p) => `<li>${esc(p)}</li>`).join('')}</ul>
       <ul class="sl-cons">${(r.cons || []).map((c) => `<li>${esc(c)}</li>`).join('')}</ul>
