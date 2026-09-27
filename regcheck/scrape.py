@@ -18,6 +18,7 @@ It's a national marketplace, so "distance" is the dealer's town rather than mile
 
 from __future__ import annotations
 
+import json
 import random
 import re
 from urllib.parse import unquote_plus
@@ -74,17 +75,33 @@ def price_to_int(price_str):
     return int(m.group(0).replace(",", "")) if m else None
 
 
+# Cazoo path segments that are filters, not a make/model (/vans/under-5000/ etc.).
+_CAZOO_NON_MAKE = re.compile(
+    r"^(under|over|from)-\d+$|^\d+$|^(electric|hybrid|diesel|petrol|automatic|manual|"
+    r"pick-?up|panel-van|minibus|camper|crew-cab|double-cab|4x4|cheap|used|new|"
+    r"nearly-new|near-me)$", re.I)
+
+
 def search_make_model(url: str):
-    """Extract (make, model) from a search URL - query params or Cazoo slugs."""
+    """(make, model) the search is filtered to - query params or Cazoo path slugs.
+
+    Used only as a FILTER (to drop sponsored listings that don't match the
+    search); each vehicle's own identity always comes from its listing page.
+    Non-make Cazoo slugs such as /under-5000/ are ignored rather than being
+    mistaken for a make.
+    """
     m1 = re.search(r"[?&]make=([^&]+)", url)
     m2 = re.search(r"[?&]model=([^&]+)", url)
     make = unquote_plus(m1.group(1)) if m1 else ""
     model = unquote_plus(m2.group(1)) if m2 else ""
     if make or model:
         return make, model
-    m = re.search(r"/(?:cars|vans)/([^/?]+)(?:/([^/?]+))?", url)  # Cazoo path form
+    m = re.search(r"cazoo\.co\.uk/(?:cars|vans)/([^?#]*)", url, re.I)
     if m:
-        return m.group(1) or "", m.group(2) or ""
+        segs = [s for s in m.group(1).split("/") if s and not _CAZOO_NON_MAKE.match(s)]
+        if segs:
+            return segs[0].replace("-", " "), (segs[1].replace("-", " ")
+                                               if len(segs) > 1 else "")
     return "", ""
 
 
@@ -258,25 +275,40 @@ def _autotrader_gallery(html: str) -> list[str]:
     return [url for _, _, url in scored]
 
 
-def _cazoo_gallery(html: str) -> list[str]:
-    """Cazoo: group autoexposure images by vehicle id, keep the largest gallery."""
-    groups: dict[str, list] = {}
+def _cazoo_gallery(html: str, listing_id: str = "") -> list[str]:
+    """Cazoo: THIS listing's own gallery, hero photo first.
+
+    The page also embeds other vehicles' full galleries ("similar vehicles"),
+    often with MORE photos, so picking the largest group reads another car - and
+    if that car is the same model it would even "verify" with the wrong plate.
+    The listing's own gallery is the one right after its listing id in the page
+    data, which is also the first gallery in the page (the hero image).
+    """
+    groups: dict[str, dict] = {}
+    first_id = None
     for m in AUTOEXP_RE.finditer(html):
-        groups.setdefault(m.group(1), []).append((int(m.group(2)), m.group(0)))
+        first_id = first_id or m.group(1)
+        groups.setdefault(m.group(1), {})[int(m.group(2))] = m.group(0)
     if not groups:
         return []
-    best = max(groups.values(), key=len)
-    best.sort()
-    return [u for _, u in best]
+    own = first_id
+    if listing_id:
+        for m in re.finditer(re.escape(listing_id), html):
+            nxt = AUTOEXP_RE.search(html, m.end())
+            if nxt and nxt.start() - m.end() < 20000:
+                own = nxt.group(1)
+                break
+    return [groups[own][k] for k in sorted(groups[own])]
 
 
-def harvest_images(page, cazoo: bool) -> list[str]:
-    """Return the listing's gallery image URLs (high resolution)."""
+def harvest_images(page, cazoo: bool, listing_id: str = "") -> list[str]:
+    """Return the listing's own gallery image URLs (high resolution)."""
     try:
         html = page.content()
     except Exception:
         html = ""
-    gallery = _cazoo_gallery(html) if cazoo else _autotrader_gallery(html)
+    gallery = (_cazoo_gallery(html, listing_id) if cazoo
+               else _autotrader_gallery(html))
     if gallery:
         return gallery
     # Fallback: any atcdn hashes on the page (unscoped) if the array isn't found.
@@ -336,14 +368,59 @@ def _title_words(page):
     return ("", "")
 
 
-def extract_make(page, url) -> str:
-    m = re.search(r"[?&]make=([^&]+)", url)
-    return unquote_plus(m.group(1)) if m else _title_words(page)[0]
+def _ld_product(html):
+    """(brand, model) from a schema.org Product/Car JSON-LD block (Cazoo)."""
+    for m in re.finditer(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>',
+                         html, re.S):
+        try:
+            d = json.loads(m.group(1))
+        except Exception:
+            continue
+        if isinstance(d, dict) and d.get("@type") in ("Product", "Car", "Vehicle"):
+            b = d.get("brand")
+            brand = b.get("name") if isinstance(b, dict) else b
+            return (brand or "").strip(), (d.get("model") or "").strip()
+    return "", ""
 
 
-def extract_model(page, url) -> str:
-    m = re.search(r"[?&]model=([^&]+)", url)
-    return unquote_plus(m.group(1)) if m else _title_words(page)[1]
+def extract_identity(page, cazoo: bool):
+    """This listing's own (make, model, source) - never the search link's.
+
+    Auto Trader: the first "make"/"model" in the page-state JSON (later ones
+    belong to "you may also like" cars). Cazoo: the schema.org Product block.
+    The structured make is trusted only if the page title names it; otherwise
+    the title parse is used. Handles multi-word makes (Land Rover) that the title
+    parser alone gets wrong.
+    """
+    try:
+        raw = page.content()
+        title = page.title() or ""
+    except Exception:
+        raw, title = "", ""
+    if cazoo:
+        make, model = _ld_product(raw)
+    else:
+        u = raw.replace('\\"', '"')
+        m1 = re.search(r'"make"\s*:\s*"([^"]{1,40})"', u)
+        m2 = re.search(r'"model"\s*:\s*"([^"]{1,60})"', u)
+        make, model = (m1.group(1) if m1 else ""), (m2.group(1) if m2 else "")
+    if make and make.lower() in title.lower():
+        return make, model, "listing data"
+    tmake, tmodel = _title_words(page)
+    if tmake:
+        return tmake, tmodel, "listing title"
+    return make, model, ("listing data (unconfirmed)" if make else "unknown")
+
+
+def extract_year(page):
+    """The listing's registration year from its title ("2014 Red Nissan Navara
+    for sale..." / "Used Nissan Navara 2015 for sale..."), or None."""
+    try:
+        title = page.title() or ""
+    except Exception:
+        return None
+    m = re.search(r"\b(19[5-9]\d|20[0-4]\d)\b", title)
+    return int(m.group(1)) if m else None
 
 
 def extract_location(page, cazoo: bool):
@@ -374,7 +451,7 @@ def extract_location(page, cazoo: bool):
 
 
 def scrape_listing(page, url, max_images, log):
-    """Return (price, make, model, location, distance_miles, [image_urls])."""
+    """Return (price, make, model, year, location, distance_miles, [image_urls])."""
     cazoo = is_cazoo(url)
     page.goto(url, wait_until="domcontentloaded", timeout=45000)
     page.wait_for_timeout(random.randint(1500, 3000))
@@ -383,11 +460,14 @@ def scrape_listing(page, url, max_images, log):
         page.wait_for_timeout(400)
 
     price = extract_price(page)
-    make = extract_make(page, url)
-    model = extract_model(page, url)
+    make, model, source = extract_identity(page, cazoo)
+    year = extract_year(page)
+    log(f"[Identity] {year or ''} {make or '?'} {model or ''} (from {source})"
+        .replace("  ", " ").strip())
     location, distance_miles = extract_location(page, cazoo)
-    images = harvest_images(page, cazoo)
+    lid = re.search(r"-for-sale/(\d+)", url)
+    images = harvest_images(page, cazoo, lid.group(1) if lid else "")
     order = "" if cazoo else ", plate shots first"
     log(f"[Scraping] Price {price}, {make or '?'} {model or ''}".rstrip()
         + f", {len(images)} image(s) (reading up to {max_images}{order})")
-    return price, make, model, location, distance_miles, images[:max_images]
+    return price, make, model, year, location, distance_miles, images[:max_images]

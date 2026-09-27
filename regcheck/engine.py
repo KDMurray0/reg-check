@@ -18,7 +18,8 @@ import time
 from collections import Counter
 
 from . import scrape
-from .mot import (MOTClient, format_mot_history, shape_vehicle, vehicle_tier)
+from .mot import (MOTClient, format_mot_history, make_matches, model_matches,
+                  shape_vehicle, vehicle_tier)
 from .plates import (_correct_plate, consensus_candidates, contains_dealer_text,
                      decode_image, plate_near_misses, read_plate_reads)
 
@@ -35,6 +36,7 @@ ANPR_OCR_MODELS = ["european-plates-mobile-vit-v2-model", "cct-s-v2-global-model
 MAX_CANDIDATE_LOOKUPS = 12    # distinct guesses to verify before giving up
 MAX_NEAR_MISS_LOOKUPS = 40    # single-char variants tried when nothing verifies
 DEALER_MIN_HITS = 2           # images reading dealer text -> classed dealer plate
+STRONG_READ = 0.4             # mean size-weighted confidence for an early-stop vote
 BACKOFF_MIN, BACKOFF_MAX = 2.0, 5.0   # polite delay between listings (not evasion)
 
 DEFAULT_OPTIONS = {
@@ -223,8 +225,14 @@ class Pipeline:
                 self.log("[Search] Expanding search results...")
                 make, model = scrape.search_make_model(line)
                 try:
-                    for r in scrape.collect_search_results(
-                            page, line, self.log, self.stop_event):
+                    found = scrape.collect_search_results(
+                        page, line, self.log, self.stop_event)
+                    if len(found) > 150:
+                        self.log(f"[Search] Heads-up: this search has {len(found)} "
+                                 f"listings - at roughly a minute each that's about "
+                                 f"{len(found) // 60} hour(s). Narrow the search "
+                                 f"(price, make, model, distance) to speed it up.")
+                    for r in found:
                         tasks.append({"url": r["url"], "distance": r["distance"],
                                       "location": r["location"], "price": r["price"],
                                       "make": make, "model": model,
@@ -248,20 +256,29 @@ class Pipeline:
     def _process(self, page, task, engines, cv2, np, requests):
         url = task["url"]
         site = "cazoo" if scrape.is_cazoo(url) else "autotrader"
-        price, d_make, d_model, d_location, d_dist, image_urls = scrape.scrape_listing(
-            page, url, self.opts["max_images"], self.log)
-        make = task.get("make") or d_make
-        model = task.get("model") or d_model
+        (price, d_make, d_model, year, d_location, d_dist,
+         image_urls) = scrape.scrape_listing(page, url, self.opts["max_images"],
+                                             self.log)
+        # The vehicle's identity always comes from its own listing page; the
+        # search link's make/model/price are only used as filters below.
+        make, model = d_make, d_model
         price = task.get("price") or price     # card price wins on Cazoo
         location, distance_miles = self._location_display(task, d_location, d_dist)
 
-        # Sponsored/promoted listings ignore the site's price filter; enforce the
-        # search URL's own price bounds ourselves before spending time reading it.
+        # Sponsored/promoted listings ignore the site's filters; enforce the
+        # search link's own price/make/model before spending time reading it.
         pint = scrape.price_to_int(price)
         lo, hi = task.get("price_lo"), task.get("price_hi")
         if pint is not None and ((hi and pint > hi) or (lo and pint < lo)):
             bound = (f"over £{hi:,}" if hi and pint > hi else f"under £{lo:,}")
             self.log(f"[FILTER] {price} is {bound} (search filter); skipping "
+                     f"out-of-filter listing.")
+            return
+        s_make, s_model = task.get("make"), task.get("model")
+        if (make and s_make and not make_matches(s_make, make)) or \
+                (model and s_model and model_matches(s_model, model) is False):
+            self.log(f"[FILTER] Listing is a {make} {model}, but the search is for "
+                     f"{s_make} {s_model}".rstrip() + " - skipping sponsored/"
                      f"out-of-filter listing.")
             return
 
@@ -270,11 +287,13 @@ class Pipeline:
             self.review.append((url, location, "no images found"))
             self.emit({"type": "review", "category": "manual", "url": url,
                        "location": location, "site": site, "price": price,
+                       "make": make, "model": model, "year": year,
                        "note": "no images found"})
             return
 
         all_reads = []                           # (chars, probs) from every photo
         image_votes: Counter[str] = Counter()    # distinct photos a plate appears in
+        strong_votes: Counter[str] = Counter()   # ...as a confident, foreground read
         dealer_hits = 0
         images_read = 0
 
@@ -291,22 +310,28 @@ class Pipeline:
             images_read += 1
             reads, texts = read_plate_reads(img, engines, cv2, np, enhanced=True)
             all_reads.extend(reads)
-            seen = set()
-            for chars, _ps in reads:
+            seen, strong = set(), set()
+            for chars, ps in reads:
                 corr = _correct_plate(chars)
                 if corr:
                     seen.add(corr)
+                    if sum(ps) / len(ps) >= STRONG_READ:   # weighted: foreground only
+                        strong.add(corr)
             for plate in seen:
                 if plate not in image_votes:
                     self.log(f"[Read] Candidate plate: {plate}")
                 image_votes[plate] += 1
+            for plate in strong:
+                strong_votes[plate] += 1
             if contains_dealer_text(texts, exclude=(make, model)):
                 dealer_hits += 1
-            # Plate shots are read first, so a plate seen in several photos is very
-            # likely the real one - stop early to save time (unless disabled).
+            # Plate shots are read first, so a plate read confidently (and as the
+            # foreground plate) in several photos is very likely the real one -
+            # stop early to save time (unless disabled). A background plate on the
+            # lot is down-weighted, so it can't trigger this.
             esv = self.opts["early_stop_votes"]
-            if (esv and images_read >= self.opts["min_images"] and image_votes
-                    and image_votes.most_common(1)[0][1] >= esv):
+            if (esv and images_read >= self.opts["min_images"] and strong_votes
+                    and strong_votes.most_common(1)[0][1] >= esv):
                 self.log(f"[Read] Strong consensus after {images_read} photo(s); stopping.")
                 break
 
@@ -317,12 +342,14 @@ class Pipeline:
                 self.dealer.append((url, location))
                 self.emit({"type": "review", "category": "dealer", "url": url,
                            "location": location, "site": site, "price": price,
+                       "make": make, "model": model, "year": year,
                            "note": None})
             else:
                 self.log("[FAILED] No registration plate could be read")
                 self.review.append((url, location, "no plate could be read"))
                 self.emit({"type": "review", "category": "manual", "url": url,
                            "location": location, "site": site, "price": price,
+                       "make": make, "model": model, "year": year,
                            "note": "no plate could be read"})
             return
 
@@ -347,11 +374,12 @@ class Pipeline:
 
         self.log(f"[Verify] {len(ordered)} candidate(s); checking against the MOT "
                  f"API (listing: {make or '?'} {model or ''})".rstrip() + "...")
-        chosen = self._verify(ordered, make, model, requests)
+        chosen, mismatches, api_error = self._verify(ordered, make, model, year,
+                                                     requests)
 
         if chosen is None:
-            corrected = (self._near_miss(ordered, make, model, requests)
-                         if self.opts["near_miss"] else None)
+            corrected = (self._near_miss(ordered, make, model, year, requests)
+                         if self.opts["near_miss"] and not api_error else None)
             if corrected is not None:
                 plate, vehicle = corrected
                 vdesc = _vdesc(vehicle)
@@ -372,23 +400,34 @@ class Pipeline:
                 self.dealer.append((url, location))
                 self.emit({"type": "review", "category": "dealer", "url": url,
                            "location": location, "site": site, "price": price,
+                       "make": make, "model": model, "year": year,
                            "note": None})
                 return
             shortlist = ", ".join(f"{p}({v})" for p, v in ordered[:8])
-            self.log(f"[FAILED] Read plate(s) but none verified: {shortlist}")
-            self.review.append((url, location, f"read but unverified: {shortlist}"))
+            if api_error:
+                note = "DVSA MOT API error - run it again"
+            elif mismatches:
+                listed = " ".join(str(x) for x in (year, make, model) if x)
+                note = (f"read {'; '.join(mismatches[:3])} - not the listed {listed}, "
+                        f"probably another vehicle in the photo (or the listing's "
+                        f"details are wrong) - check and enter the reg if it's right")
+            else:
+                note = f"read but unverified: {shortlist}"
+            self.log(f"[FAILED] {note}")
+            self.review.append((url, location, note))
             self.emit({"type": "review", "category": "manual", "url": url,
                        "location": location, "site": site, "price": price,
-                       "note": f"read but unverified: {shortlist}"})
+                       "make": make, "model": model, "year": year,
+                       "note": note})
             return
 
         tier, votes, plate, vehicle = chosen
         vdesc = _vdesc(vehicle)
         warning = None
-        if tier == 1:
-            warning = (f"Make matches but model differs from listing '{model}'. "
-                       f"Verify manually.")
-            self.log(f"[WARNING] {plate} is a {vdesc} - {warning}")
+        if tier == 2:
+            warning = ("The listing didn't state a model, so only the make could be "
+                       "checked - confirm it's the right vehicle.")
+            self.log(f"[WARNING] {plate}: {warning}")
         self.log(f"[SUCCESS] {plate} verified as {vdesc} ({votes} photo(s), "
                  f"tier {tier}/3)")
         self._write_record(plate, price, location, url, format_mot_history(vehicle))
@@ -397,18 +436,35 @@ class Pipeline:
                            "warning": warning, **shape_vehicle(vehicle)})
         self.n_success += 1
 
-    def _verify(self, ordered, make, model, requests):
-        """Best-matching real vehicle: (tier, votes, plate, vehicle) or None."""
-        best = None
+    def _lookup(self, plate, requests):
+        """DVSA lookup with one retry, so a transient API blip doesn't send a
+        listing to manual review. Raises if the API is still failing."""
+        try:
+            return self.mot.lookup(plate, requests)
+        except Exception:
+            time.sleep(2)
+            return self.mot.lookup(plate, requests)
+
+    def _verify(self, ordered, make, model, year, requests):
+        """Best real vehicle that matches the listing.
+
+        Returns (chosen, mismatches, api_error): chosen is (tier, votes, plate,
+        vehicle) or None. A tier-1 hit - right make, different model, e.g. a
+        Nissan Note read in a Navara listing - is almost always another vehicle in
+        the photo, so it is NOT accepted; it's reported in `mismatches` instead.
+        So is a right-model hit first registered in a different year to the one
+        the listing states (another car of the same model on the lot).
+        """
+        best, mismatches = None, []
         for plate, votes in ordered[:MAX_CANDIDATE_LOOKUPS]:
             if self.stop_event.is_set():
                 break
             self.log(f"[Verify] Checking {plate} ({votes} photo(s))...")
             try:
-                vehicle = self.mot.lookup(plate, requests)
+                vehicle = self._lookup(plate, requests)
             except Exception as exc:
                 self.log(f"[Verify] MOT API error: {exc}")
-                break
+                return best, mismatches, True
             if vehicle is None:
                 continue
             tier = vehicle_tier(make, model, vehicle)
@@ -416,13 +472,25 @@ class Pipeline:
                 self.log(f"[Verify] {plate} is a real {vehicle.get('make', '')} - "
                          f"wrong make, ignoring")
                 continue
+            if tier == 1:
+                self.log(f"[Verify] {plate} is a {_vdesc(vehicle)}, not the listed "
+                         f"{make} {model} - probably another vehicle; ignoring")
+                mismatches.append(f"{plate} = {_vdesc(vehicle)}")
+                continue
+            clash = _year_clash(year, vehicle)
+            if clash:
+                self.log(f"[Verify] {plate} is a {_vdesc(vehicle)} first registered "
+                         f"{clash}, but the listing says {year} - probably another "
+                         f"vehicle; ignoring")
+                mismatches.append(f"{plate} = {clash} {_vdesc(vehicle)}")
+                continue
             if tier == 3:
-                return (tier, votes, plate, vehicle)
+                return (tier, votes, plate, vehicle), mismatches, False
             if best is None or tier > best[0]:
                 best = (tier, votes, plate, vehicle)
-        return best
+        return best, mismatches, False
 
-    def _near_miss(self, ordered, make, model, requests):
+    def _near_miss(self, ordered, make, model, year, requests):
         """Single-char API variants of the top guesses; only a full match is kept."""
         self.log("[Correct] No exact match; trying near-miss variants...")
         tried = {p.replace(" ", "") for p, _ in ordered}
@@ -437,11 +505,12 @@ class Pipeline:
                 tried.add(key)
                 lookups += 1
                 try:
-                    vehicle = self.mot.lookup(variant, requests)
+                    vehicle = self._lookup(variant, requests)
                 except Exception as exc:
                     self.log(f"[Correct] MOT API error: {exc}")
                     return None
-                if vehicle and vehicle_tier(make, model, vehicle) == 3:
+                if (vehicle and vehicle_tier(make, model, vehicle) == 3
+                        and not _year_clash(year, vehicle)):
                     self.log(f"[Correct] {plate} -> {variant} matches {_vdesc(vehicle)}")
                     return (variant, vehicle)
         return None
@@ -501,6 +570,15 @@ def _fetch_image(requests, img_url):
 
 def _vdesc(vehicle):
     return f"{vehicle.get('make', '')} {vehicle.get('model', '')}".strip()
+
+
+def _year_clash(listing_year, vehicle):
+    """DVSA's first-registration year if it's more than a year away from the
+    year the listing states (so it's probably a different vehicle), else None."""
+    first = (vehicle.get("firstUsedDate") or vehicle.get("registrationDate") or "")[:4]
+    if not (listing_year and first.isdigit()):
+        return None
+    return int(first) if abs(int(first) - int(listing_year)) > 1 else None
 
 
 def _to_float(v):

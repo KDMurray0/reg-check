@@ -17,7 +17,7 @@ import threading
 
 from flask import Flask, Response, request, send_from_directory, stream_with_context
 
-from .engine import Pipeline
+from .engine import Pipeline, _year_clash
 from .mot import MOTClient
 from .review import PROVIDERS, is_local, list_models, run_tournament
 
@@ -198,6 +198,10 @@ def post_lookup():
         warning = (f"DVSA says {plate} is a {vehicle.get('make', '')} "
                    f"{vehicle.get('model', '')}, but the listing is a {l_make} "
                    f"{l_model} - double-check the reg.")
+    clash = _year_clash(body.get("year"), vehicle)
+    if not warning and clash:
+        warning = (f"DVSA says {plate} was first registered in {clash}, but the "
+                   f"listing says {body.get('year')} - double-check the reg.")
     result = {"plate": plate, "verified": True, "corrected": False, "tier": 3,
               "manual": True, "votes": None, "warning": warning,
               "price": body.get("price") or None,

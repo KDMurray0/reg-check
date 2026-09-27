@@ -322,7 +322,7 @@ function wireManualEdit(item, ev) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plate, url: ev.url, location: ev.location,
                                price: ev.price, site: ev.site,
-                               make: ev.make, model: ev.model }),
+                               make: ev.make, model: ev.model, year: ev.year }),
       });
       const d = await r.json();
       if (!r.ok) { msg.textContent = d.error || 'Not found'; return; }

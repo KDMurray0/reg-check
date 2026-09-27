@@ -94,8 +94,11 @@ def make_matches(listing_make: str, api_make: str) -> bool:
     """
     if not listing_make or not api_make:
         return True
+    # Letters only on BOTH sides, so "Mercedes-Benz" matches DVSA's
+    # "MERCEDES-BENZ" (and "Land Rover" matches "LAND ROVER").
     token = re.sub(r"[^A-Z]", "", listing_make.upper().split()[0])
-    return bool(token) and token in api_make.upper()
+    api = re.sub(r"[^A-Z]", "", api_make.upper())
+    return bool(token) and bool(api) and (token in api or api in token)
 
 
 def model_matches(listing_model: str, api_model: str):
@@ -108,7 +111,12 @@ def model_matches(listing_model: str, api_model: str):
         return None
     lt = set(re.findall(r"[A-Z0-9]{3,}", listing_model.upper()))
     at = set(re.findall(r"[A-Z0-9]{3,}", api_model.upper()))
-    return bool(lt & at)
+    if lt:
+        return bool(lt & at)
+    # Short model names (X5, A4, Q7) have no 3+ character token: match whole words.
+    lw = set(re.findall(r"[A-Z0-9]{2,}", listing_model.upper()))
+    aw = set(re.findall(r"[A-Z0-9]{2,}", api_model.upper()))
+    return bool(lw & aw) if lw else None
 
 
 def vehicle_tier(listing_make, listing_model, vehicle) -> int:
